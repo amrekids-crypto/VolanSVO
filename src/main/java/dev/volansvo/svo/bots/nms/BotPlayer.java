@@ -90,6 +90,20 @@ public final class BotPlayer extends ServerPlayer {
         return true;
     }
 
+    /**
+     * Урон от падения у игрока сервер считает по пакетам движения клиента, а Entity.move
+     * для игроков его пропускает. Бот двигается без пакетов, поэтому падал без урона и
+     * спокойно шагал с крыш. Считаем так же, как сервер считает по пакету клиента.
+     */
+    @Override
+    public void move(net.minecraft.world.entity.MoverType type, net.minecraft.world.phys.Vec3 movement) {
+        double x0 = this.getX(), y0 = this.getY(), z0 = this.getZ();
+        super.move(type, movement);
+        if (type == net.minecraft.world.entity.MoverType.SELF && !this.isSpectator() && !this.isPassenger()) {
+            this.doCheckFallDamage(this.getX() - x0, this.getY() - y0, this.getZ() - z0, this.onGround());
+        }
+    }
+
     /** Движение бота считает сервер, поэтому он и есть «локальный» владелец сущности. */
     @Override
     public boolean isControlledByLocalInstance() {

@@ -36,7 +36,10 @@ import java.util.UUID;
  *    отпускании приседа (игрок у тела, в выживании, стойки убраны, заряд списан);
  *  - в полёте (бомбила и FPV) слот не переключается: команды предмета работают только из
  *    главной руки, и после переключения отпущенный Shift не возвращал к телу, а заряд
- *    списывался с другого слота, и дрон оставался в инвентаре навсегда.
+ *    списывался с другого слота, и дрон оставался в инвентаре навсегда;
+ *  - оба дрона одноразовые: если после полёта дрон всё ещё лежит в том же слоте, списываем
+ *    его сами и пересылаем игроку инвентарь (подменённый шлем-оверлей FPV на клиенте
+ *    отменой не снимается, пропадает только при синхронизации).
  */
 public final class BombDroneGuard extends BukkitRunnable implements Listener {
 
@@ -49,8 +52,14 @@ public final class BombDroneGuard extends BukkitRunnable implements Listener {
 
     private static final class Flight {
         final int start;
+        final boolean fpv;
+        final int slot;      // слот дрона на взлёте
+        final String item;   // id предмета EI
+        final int amount;
         UUID drone;
-        Flight(int start) { this.start = start; }
+        Flight(int start, boolean fpv, int slot, String item, int amount) {
+            this.start = start; this.fpv = fpv; this.slot = slot; this.item = item; this.amount = amount;
+        }
     }
 
     public BombDroneGuard(VolanSVO plugin) {
@@ -76,20 +85,27 @@ public final class BombDroneGuard extends BukkitRunnable implements Listener {
     public void run() {
         tick++;
         for (Player p : Bukkit.getOnlinePlayers()) {
-            boolean fly = p.getGameMode() == GameMode.SPECTATOR && p.getScoreboardTags().contains("bombfly");
+            boolean spectator = p.getGameMode() == GameMode.SPECTATOR;
+            Set<String> tags = p.getScoreboardTags();
+            boolean bomb = spectator && tags.contains("bombfly");
+            boolean fpv = spectator && !bomb && tags.contains("fpvfly");
             Flight f = flights.get(p.getUniqueId());
-            if (!fly) {
+            if (!bomb && !fpv) {
                 if (f != null) {
                     flights.remove(p.getUniqueId());
                     removeDrone(f);
-                    cleanBodyLater(p);
+                    if (!f.fpv) cleanBodyLater(p);
+                    consumeLater(p, f);
                 }
                 continue;
             }
             if (f == null) {
-                f = new Flight(tick);
+                int slot = p.getInventory().getHeldItemSlot();
+                ItemStack held = p.getInventory().getItem(slot);
+                f = new Flight(tick, fpv, slot, fpv ? "bfpv" : "bombsender", held == null ? 0 : held.getAmount());
                 flights.put(p.getUniqueId(), f);
             }
+            if (f.fpv) continue; // FPV свой полёт ведёт сам, нам только списать его после
             ArmorStand drone = drone(p, f);
             if (drone != null) {
                 Location l = p.getLocation();
@@ -177,6 +193,31 @@ public final class BombDroneGuard extends BukkitRunnable implements Listener {
         if (crash) {
             w.spawnParticle(Particle.EXPLOSION, at, 1);
             w.playSound(at, Sound.ENTITY_GENERIC_EXPLODE, 0.7f, 1.5f);
+        }
+        consumeLater(p, f);
+    }
+
+    /**
+     * Через полторы секунды после посадки: одноразовый дрон всё ещё в том же слоте (предмет
+     * не списал его сам) - списываем, и пересылаем инвентарь, чтобы снять оверлей FPV.
+     */
+    private void consumeLater(final Player p, final Flight f) {
+        new BukkitRunnable() {
+            @Override public void run() {
+                if (!p.isOnline() || flying(p)) return;
+                ItemStack it = p.getInventory().getItem(f.slot);
+                String id = dev.volansvo.svo.bots.Items.eiId(it);
+                if (id != null && id.equalsIgnoreCase(f.item) && f.amount > 0 && it.getAmount() >= f.amount) {
+                    if (it.getAmount() > 1) it.setAmount(it.getAmount() - 1);
+                    else p.getInventory().setItem(f.slot, null);
+                }
+                p.updateInventory();
+            }
+        }.runTaskLater(plugin, 30L);
+        if (f.fpv) {
+            new BukkitRunnable() {
+                @Override public void run() { if (p.isOnline() && !flying(p)) p.updateInventory(); }
+            }.runTaskLater(plugin, 70L);
         }
     }
 

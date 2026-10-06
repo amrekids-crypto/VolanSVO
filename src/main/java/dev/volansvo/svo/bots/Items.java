@@ -317,6 +317,8 @@ public final class Items {
     /** Защитная ценность предмета брони. */
     public static double armorValue(ItemStack it) {
         if (it == null || it.getType().isAir()) return 0;
+        // Пояс шахида как броню не надеваем: двойной присед рядом с врагом его взрывает.
+        if ("suicide_vest".equals(warkitId(it))) return 0;
         EquipmentSlot slot = armorSlot(it.getType());
         if (slot == null) return 0;
         double armor = 0, tough = 0;

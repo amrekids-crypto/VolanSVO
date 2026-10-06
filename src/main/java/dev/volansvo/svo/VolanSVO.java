@@ -85,17 +85,24 @@ public class VolanSVO extends JavaPlugin {
         dev.volansvo.svo.managers.BombDroneGuard droneGuard = new dev.volansvo.svo.managers.BombDroneGuard(this);
         droneGuard.runTaskTimer(this, 1L, 1L);
         getServer().getPluginManager().registerEvents(droneGuard, this);
+        // Дрон-самонаводка: полёт ведёт плагин (цикл в самом предмете ронял тик).
+        miniDrones = new dev.volansvo.svo.managers.MiniDroneDriver(this);
+        miniDrones.runTaskTimer(this, 1L, 1L);
+        getCommand("asvominidrone").setExecutor(miniDrones);
         getLogger().info("VolanSVO enabled.");
     }
 
     @Override
     public void onDisable() {
+        if (miniDrones != null) miniDrones.shutdown();
         if (gameManager != null) gameManager.forceStop();
         if (botManager != null) botManager.shutdown();
         if (bossbarManager != null) bossbarManager.cleanup();
         if (statsManager != null) statsManager.saveAll();
         getLogger().info("VolanSVO disabled.");
     }
+
+    private dev.volansvo.svo.managers.MiniDroneDriver miniDrones;
 
     public static VolanSVO getInstance() { return instance; }
 

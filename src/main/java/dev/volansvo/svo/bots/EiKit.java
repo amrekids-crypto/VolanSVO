@@ -223,7 +223,7 @@ final class EiKit {
             case STIM: BotNms.useItem(p, false); cool(u, now, 20 * 36); break;
             case FATIGUE: BotNms.useItem(p, false); cool(u, now, 20 * 8); break;
             case ZEUS: BotNms.useItem(p, false); cool(u, now, 20 * 10); break;
-            case PULSE: BotNms.clickAir(p); cool(u, now, 14); break;
+            case PULSE: BotNms.clickAir(p); cool(u, now, 5); break;
             case SNIPER:
                 BotNms.sneak(p, false);
                 BotNms.sneak(p, true); // выстрел по нажатию приседа
@@ -306,6 +306,18 @@ final class EiKit {
             }
         }
         if (calm) refill(p, now);
+    }
+
+    /** Есть ли пачка патронов к автомату (ak) или дробовику. */
+    static boolean hasAmmo(Player p, boolean ak) {
+        return find(p, ak ? Use.AMMO_AK : Use.AMMO_SHOTGUN) >= 0;
+    }
+
+    /** Зарядить пачку прямо сейчас (в бою, когда магазин пуст и запаса нет). true - занялись этим. */
+    boolean refillNow(Player p, int now) {
+        if (restoreOffhandAt >= 0) return true;
+        refill(p, now);
+        return restoreOffhandAt >= 0;
     }
 
     /** Патроны в левую руку, ствол в правую, клик - и обратно. */

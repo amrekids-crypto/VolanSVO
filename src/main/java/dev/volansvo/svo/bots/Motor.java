@@ -44,6 +44,8 @@ public final class Motor {
      */
     public void drive(Player p, double dx, double dz, double speed, float strafe, boolean jump, boolean wantSprint) {
         double len = Math.sqrt(dx * dx + dz * dz);
+        // Забор, стена, калитка выше прыжка: прыгать в них бесполезно (так бот и скакал у забора).
+        if (jump && len > 1e-4 && jumpUseless(p, dx / len, dz / len)) jump = false;
         float fwd = 0f, side = 0f;
         if (len > 1e-4 && speed > 0) {
             double nx = dx / len, nz = dz / len;
@@ -59,6 +61,39 @@ public final class Motor {
         BotNms.input(p, fwd, side, jump);
         boolean sprint = wantSprint && fwd > 0.8f && p.getFoodLevel() > 6 && !p.isSneaking();
         BotNms.sprint(p, sprint);
+    }
+
+    /**
+     * Впереди препятствие, которое прыжком не взять: у блока на уровне ног хитбокс выше
+     * 1.2 (забор, стена, калитка - полтора блока) или над ним ещё один твёрдый блок.
+     */
+    public static boolean jumpUseless(Player p, double nx, double nz) {
+        org.bukkit.Location l = p.getLocation();
+        return tallAt(l.getWorld(), (int) Math.floor(l.getX() + nx * 0.7), (int) Math.floor(l.getZ() + nz * 0.7), l.getY());
+    }
+
+    /** В клетке (x,z) на уровне ног feet стоит то, что прыжком не взять (забор, стена). */
+    public static boolean tallAt(org.bukkit.World w, int x, int z, double feet) {
+        int fy = (int) Math.floor(feet + 0.01);
+        for (int dy = 0; dy <= 1; dy++) {
+            org.bukkit.block.Block b = w.getBlockAt(x, fy + dy, z);
+            if (b.isPassable()) continue;
+            double top = b.getY();
+            for (org.bukkit.util.BoundingBox bb : b.getCollisionShape().getBoundingBoxes()) top = Math.max(top, b.getY() + bb.getMaxY());
+            if (top - feet > 1.2) return true;
+        }
+        return false;
+    }
+
+    /** Между ботом и точкой (по прямой, на уровне ног) есть забор или стена выше прыжка. */
+    public static boolean tallBetween(Player p, org.bukkit.Location to) {
+        org.bukkit.Location l = p.getLocation();
+        double dx = to.getX() - l.getX(), dz = to.getZ() - l.getZ();
+        double len = Math.sqrt(dx * dx + dz * dz);
+        for (double s = 0.5; s < len - 0.4; s += 0.4) {
+            if (tallAt(l.getWorld(), (int) Math.floor(l.getX() + dx / len * s), (int) Math.floor(l.getZ() + dz / len * s), l.getY())) return true;
+        }
+        return false;
     }
 
     public void stop(Player p) {

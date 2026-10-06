@@ -41,3 +41,6 @@ commands:
   asvobot:
     description: Боты СВО (список/удалить всех/перечитать настройки)
     usage: /asvobot [list|removeall|reload]
+  asvominidrone:
+    description: Служебная, её вызывает предмет minidrone (полёт дрона-самонаводки)
+    usage: /asvominidrone <игрок>

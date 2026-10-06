@@ -59,6 +59,8 @@ public final class Navigator {
 
     public Location getGoal() { return goal; }
     public boolean hasPath() { return steps != null && idx < steps.size(); }
+    /** Текущий путь доходит до цели (а не обрывается в ближайшей к ней точке). */
+    public boolean reaches() { return steps != null && reaches; }
     /** Сколько раз подряд не удалось дойти до текущей цели. */
     public int getFailures() { return failures; }
     /** Сколько тиков подряд бот не приближается к узлу пути. */

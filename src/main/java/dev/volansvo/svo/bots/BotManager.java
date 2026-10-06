@@ -55,7 +55,8 @@ public final class BotManager implements Listener {
         "nikitos228", "EgorPvP", "maks_ultra", "Lesha_777", "Danya_Best", "Timur_pro", "Vladik2010",
         "Pashka_Gamer", "Serega_X", "ilya_mc", "Grisha_Top", "Kostya_nub", "Roma_Shturm", "Andryxa",
         "Misha_Sniper", "kirill_bro", "Stepan_Pro", "Lev_Boss", "Fedya_2012", "Tolik_Tank", "Ruslan_RU",
-        "Yarik_mine", "Seva_play", "Gleb_Strike", "Bogdan_kill", "Denis_Desant", "Oleg_Spetsnaz"
+        "Yarik_mine", "Seva_play", "Gleb_Strike", "Bogdan_kill", "Denis_Desant", "Oleg_Spetsnaz",
+        "Kolya_PirAr", "Dima_PirAr", "Maks_PirAr", "Vovan_PirAr", "Zheka_PirAr", "Artur_PirAr"
     };
     private static final String[] DEFAULT_SKINS = {
         "Soldier", "Sniper", "Army", "Military", "Commando", "Ranger", "Spetsnaz", "Tankist", "Partisan",
@@ -523,7 +524,23 @@ public final class BotManager implements Listener {
 
     private String pick(BotChatter.Topic t) {
         String[] lines = BotChatter.LINES.get(t);
-        return lines == null || lines.length == 0 ? null : lines[rnd.nextInt(lines.length)];
+        if (lines == null || lines.length == 0) return null;
+        boolean noWarden = !wardenInGame();
+        for (int i = 0; i < 10; i++) {
+            String l = lines[rnd.nextInt(lines.length)];
+            if (!(noWarden && mentionsWarden(l))) return l;
+        }
+        return null;
+    }
+
+    /** Жириновский сейчас в игре (иначе боты про него не вспоминают). */
+    private boolean wardenInGame() {
+        org.bukkit.entity.Warden w = hooks.warden();
+        return w != null && w.isValid() && !w.isDead();
+    }
+
+    private static boolean mentionsWarden(String s) {
+        return s != null && s.toLowerCase(java.util.Locale.ROOT).contains("жиринов");
     }
 
     private static String fill(String raw, String killer, String victim, String other) {
@@ -579,6 +596,26 @@ public final class BotManager implements Listener {
                 Bukkit.getScheduler().runTaskLater(plugin, () -> {
                     if (other.isOnline() && answer != null) worldMessage(w, other.getName(), answer);
                 }, delay + 30L + rnd.nextInt(50));
+            }
+        }
+    }
+
+    /** Крикнуть сразу, без очереди общего чата (камикадзе), с ответом другого бота. */
+    void shout(Player p, BotChatter.Topic t, String victim) {
+        if (!skill.chat) return;
+        final String msg = fill(pick(t), null, victim, null);
+        if (msg == null) return;
+        lastGlobalChat = tick;
+        final org.bukkit.World w = p.getWorld();
+        worldMessage(w, p.getName(), msg);
+        BotChatter.Topic r = BotChatter.replyTo(t);
+        if (r != null && rnd.nextDouble() < 0.4) {
+            final Player other = randomOtherBot(w, p.getUniqueId());
+            if (other != null) {
+                final String answer = fill(pick(r), null, victim, p.getName());
+                Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    if (other.isOnline() && answer != null) worldMessage(w, other.getName(), answer);
+                }, 25L + rnd.nextInt(30));
             }
         }
     }
@@ -639,8 +676,17 @@ public final class BotManager implements Listener {
             Player a = alive.get(rnd.nextInt(alive.size()));
             Player b = randomOtherBot(a.getWorld(), a.getUniqueId());
             if (b == null) return;
-            String[] pair = BotChatter.SMALLTALK[rnd.nextInt(BotChatter.SMALLTALK.length)];
-            final String q = pair[0], ans = pair[1 + rnd.nextInt(pair.length - 1)];
+            boolean noWarden = !wardenInGame();
+            String[] pair = null;
+            for (int i = 0; i < 10 && pair == null; i++) {
+                String[] c = BotChatter.SMALLTALK[rnd.nextInt(BotChatter.SMALLTALK.length)];
+                if (!(noWarden && mentionsWarden(c[0]))) pair = c;
+            }
+            if (pair == null) return;
+            List<String> answers = new ArrayList<String>();
+            for (int i = 1; i < pair.length; i++) if (!(noWarden && mentionsWarden(pair[i]))) answers.add(pair[i]);
+            if (answers.isEmpty()) return;
+            final String q = pair[0], ans = answers.get(rnd.nextInt(answers.size()));
             final org.bukkit.World w = a.getWorld();
             final String an = a.getName(), bn = b.getName();
             lastGlobalChat = tick;
