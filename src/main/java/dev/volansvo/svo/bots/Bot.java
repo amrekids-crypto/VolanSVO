@@ -102,6 +102,8 @@ public final class Bot {
     private int lastHurt = -1000;
     private double lastBorderSize = -1;
     private boolean borderShrinking;
+    private double borderEdgeSpeed;
+    private int lastBorderTick;
 
     // --- изучение неизвестных предметов
     private String learnKey;
@@ -521,8 +523,14 @@ public final class Bot {
         // Зона.
         WorldBorder wb = w.getWorldBorder();
         double size = wb.getSize();
-        if (lastBorderSize > 0) borderShrinking = size < lastBorderSize - 0.01;
+        if (lastBorderSize > 0) {
+            double shrunk = lastBorderSize - size;
+            borderShrinking = shrunk > 0.01;
+            // На сколько край подходит за тик (с каждой стороны - половина сужения).
+            borderEdgeSpeed = borderShrinking ? shrunk / 2.0 / Math.max(1, now - lastBorderTick) : 0;
+        }
         lastBorderSize = size;
+        lastBorderTick = now;
 
         // Сундуки перезаполнились - забываем обысканные.
         int gen = hooks.lootGeneration();
@@ -546,8 +554,8 @@ public final class Bot {
         Item nuke = nukeCached != null && nukeCached.isValid() ? nukeCached : null;
         if (nuke != null) { pickup = nuke; return Goal.PICK_NUKE; }
 
-        // 4. Зона.
-        if (zoneDanger(p) > 0) return Goal.ZONE;
+        // 4. Зона. Враг рядом, а зона стоит (или до края ещё секунд 10 хода) - сначала бой.
+        if (zoneDanger(p) > 0 && !fightNearZone(p, now)) return Goal.ZONE;
 
         // 4б. Видим/слышим вражеский дрон, рядом динамит - убегаем, лучше под крышу.
         if (droneThreat != null && now < droneThreatUntil) return Goal.DODGE;
@@ -742,6 +750,14 @@ public final class Bot {
             BotNms.releaseUseItem(p);
             bowDrawStart = -1;
             crossbowLoadStart = -1;
+        }
+
+        // Начатый блок доламываем до конца: иначе путь или цель меняются, трещина
+        // сбрасывается, и бот раз за разом начинает тот же песок заново.
+        if (builder.isMining() && goal != Goal.FIGHT && goal != Goal.DODGE && goal != Goal.EVADE
+                && goal != Goal.DROP && goal != Goal.HEAL && goal != Goal.NUKE && goal != Goal.PICK_NUKE) {
+            motor.stop(p);
+            if (builder.resumeMining(p, now)) return;
         }
 
         Location rideWalk = rides.walkTarget();
@@ -1106,7 +1122,7 @@ public final class Bot {
         Block roof = w.getBlockAt(l.getBlockX(), feet + 2, l.getBlockZ());
         Block pick = null;
         // Над блоком песок или гравий - выкопаем, он осыплется, и так без конца.
-        if (w.getBlockAt(ax, feet + 2, az).getType().hasGravity() || roof.getRelative(org.bukkit.block.BlockFace.UP).getType().hasGravity()) {
+        if (fallingColumn(w, ax, feet + 2, az) > 3 || fallingColumn(w, l.getBlockX(), feet + 3, l.getBlockZ()) > 3) {
             digCount = 5;
             return false;
         }
@@ -1118,6 +1134,13 @@ public final class Bot {
         minedBlock = pick;
         motor.stop(p);
         return builder.mine(p, pick, now);
+    }
+
+    /** Сколько блоков песка/гравия стоит столбиком начиная с (x,y,z) вверх (до 6). */
+    private static int fallingColumn(World w, int x, int y, int z) {
+        int n = 0;
+        while (n < 6 && w.getBlockAt(x, y + n, z).getType().hasGravity()) n++;
+        return n;
     }
 
     // =====================================================================  бой
@@ -1209,7 +1232,8 @@ public final class Bot {
             if (reactionLeft > 0) { reactionLeft--; return; }
             boolean falling = !onGround && p.getVelocity().getY() < -0.05;
             boolean critWindow = !critJumped || falling;
-            if (d <= 3.05 && p.getAttackCooldown() >= 0.92f && critWindow && aimedAt(p, e, 18f)) {
+            boolean handOk = ready && (slot >= 0 || punchable(p.getInventory().getItemInMainHand()));
+            if (handOk && d <= 3.05 && p.getAttackCooldown() >= 0.92f && critWindow && aimedAt(p, e, 18f)) {
                 BotNms.attack(p, e);
                 tauntOnAttack(p, e);
                 critJumped = false;
@@ -1258,12 +1282,14 @@ public final class Bot {
         Weapon w = chooseWeapon(p, d, now);
         if (w == Weapon.MELEE && d > 3.2) return;
         int slot = weaponSlot(p, w);
+        if (w == Weapon.MELEE && slot < 0) slot = freeHandSlot(p);
         if (slot >= 0 && !hold(p, slot, now)) return;
         Location aim = aimPoint(p, target.entity, target, w, d);
         if (!aimedAt(p, target.entity, 12f)) return;
         if (reactionLeft > 0) { reactionLeft--; return; }
         if (w == Weapon.MELEE) {
-            if (p.getAttackCooldown() > 0.9f) BotNms.attack(p, target.entity);
+            if (p.getAttackCooldown() > 0.9f && (slot >= 0 || punchable(p.getInventory().getItemInMainHand())))
+                BotNms.attack(p, target.entity);
         } else fireWeapon(p, w, target.entity, aim, d, now);
     }
 
@@ -1359,7 +1385,7 @@ public final class Bot {
 
     private void reload(Player p, int now) {
         if (now < reloadUntil) return;
-        BotNms.swing(p); // ЛКМ в воздух = перезарядка у MilitaryCraft
+        BotNms.clickAir(p); // ЛКМ в воздух = перезарядка у MilitaryCraft
         reloadUntil = now + 20;
     }
 
@@ -1373,8 +1399,13 @@ public final class Bot {
         boolean sprayer = find(p, Items.Kind.SPRAYER) >= 0;
         boolean bow = find(p, Items.Kind.BOW) >= 0 && hasArrows(p);
         boolean xbow = find(p, Items.Kind.CROSSBOW) >= 0 && (hasArrows(p) || crossbowCharged(p));
-        int auto = findEi(p, Items.Custom.AUTO, now);
-        int shotgun = findEi(p, Items.Custom.SHOTGUN, now);
+        int auto = findEi(p, Items.Custom.AUTO, now, true);
+        int shotgun = findEi(p, Items.Custom.SHOTGUN, now, true);
+        // Заряженных нет, а стрелять больше не из чего: берём пустой ствол с запасом и заряжаем.
+        if (auto < 0 && shotgun < 0 && !gun) {
+            auto = findEi(p, Items.Custom.AUTO, now, false);
+            shotgun = findEi(p, Items.Custom.SHOTGUN, now, false);
+        }
         if (shotgun >= 0 && d <= 8) return Weapon.SHOTGUN;
         if (auto >= 0 && d <= 3.2 && melee >= 9 && !gun) return Weapon.MELEE;
         boolean thr = find(p, Items.Kind.THROW_DAMAGE) >= 0 && now >= nextThrow;
@@ -1942,7 +1973,7 @@ public final class Bot {
             if (!Builder.canDig(p, b)) { caveWhy = "nodig " + b.getType(); rotateCaveDir(now); motor.stop(p); return; }
             motor.stop(p);
             caveWhy = "mine " + b.getType();
-            if (!builder.mine(p, b, now)) { caveWhy = "minefail " + b.getType(); rotateCaveDir(now); }
+            if (!builder.mine(p, b, now) && b.getType().isSolid()) { caveWhy = "minefail " + b.getType(); rotateCaveDir(now); }
             return;
         }
         Block step = w.getBlockAt(x + dx, y + (vert > 0 ? 0 : -1), z + dz);
@@ -2607,6 +2638,21 @@ public final class Bot {
         return edge < margin ? margin - edge : 0;
     }
 
+    /** Расстояние до края зоны (меньше нуля - уже за краем). */
+    private double zoneEdge(Player p) {
+        WorldBorder wb = p.getWorld().getWorldBorder();
+        Location l = p.getLocation();
+        return wb.getSize() / 2.0 - Math.max(Math.abs(l.getX() - wb.getCenter().getX()), Math.abs(l.getZ() - wb.getCenter().getZ()));
+    }
+
+    /** У края зоны можно драться: враг на виду, а зона стоит или доедет не раньше чем через 10 сек. */
+    private boolean fightNearZone(Player p, int now) {
+        Contact t = target;
+        if (t == null || t.entity == null || !(t.visible || now - t.seenTick < 40)) return false;
+        double need = borderShrinking ? borderEdgeSpeed * 20 * 10 + 3 : 1.5;
+        return zoneEdge(p) > need;
+    }
+
     private boolean insideBorder(World w, double x, double z, double margin) {
         WorldBorder wb = w.getWorldBorder();
         double half = wb.getSize() / 2.0 - margin;
@@ -2932,7 +2978,13 @@ public final class Bot {
 
     /** Слот плагинного предмета этого типа (стволы, которые «не стреляют», пропускаем минуту). */
     private int findEi(Player p, Items.Custom type, int now) {
+        return findEi(p, type, now, false);
+    }
+
+    /** loadedOnly - только с патронами в магазине; иначе пустой с запасом тоже годится. */
+    private int findEi(Player p, Items.Custom type, int now, boolean loadedOnly) {
         PlayerInventory inv = p.getInventory();
+        int empty = -1;
         for (int i = 0; i < 36; i++) {
             ItemStack it = inv.getItem(i);
             if (it == null || Items.kind(it, hooks) != Items.Kind.CUSTOM || Items.customType(it) != type) continue;
@@ -2940,11 +2992,14 @@ public final class Bot {
             if (dud != null && now < dud) continue;
             int[] mag = Items.eiMag(it);
             if (mag != null && mag[0] == 0 && mag[2] == 0) continue; // патронов нет совсем
-            // Пустой магазин: в бою берём другой ствол, этот перезаряжаем, только если он в руке.
-            if (mag != null && mag[0] == 0 && i != inv.getHeldItemSlot() && now >= eiReloadUntil) continue;
+            if (mag != null && mag[0] == 0) {
+                // Магазин пуст, запас есть: годится, если заряженного нет (тот, что в руке, первым).
+                if (empty < 0 || i == inv.getHeldItemSlot()) empty = i;
+                continue;
+            }
             return i;
         }
-        return -1;
+        return loadedOnly ? -1 : empty;
     }
 
     private int findCustom(Player p, Items.Custom type) {
@@ -2981,8 +3036,13 @@ public final class Bot {
     }
 
     /** Перезарядка плагинного ствола (ЛКМ) в спокойную минуту, как сделал бы игрок. */
+    private int nextEiCheck;
+
     private void maybeReloadEi(Player p, int now) {
-        if (!eiNeedsReload || now < busyUntil) return;
+        if (now < busyUntil || now < eiReloadUntil) return;
+        // После своего выстрела смотрим сразу, а подобранные полупустые стволы раз в 3 сек.
+        if (!eiNeedsReload && now < nextEiCheck) return;
+        nextEiCheck = now + 60;
         if (target != null && now - target.seenTick < 60) return;
         PlayerInventory inv = p.getInventory();
         int slot = -1, time = 0;
@@ -2993,7 +3053,7 @@ public final class Bot {
             Items.Custom t = Items.customType(it);
             if (t != Items.Custom.SHOTGUN && t != Items.Custom.AUTO) continue;
             int[] mag = Items.eiMag(it);
-            if (mag == null) { if (!unknown) { unknown = true; slot = i; time = eiReloadTicks(t, null); } continue; }
+            if (mag == null) { if (eiNeedsReload && !unknown) { unknown = true; slot = i; time = eiReloadTicks(t, null); } continue; }
             if (mag[2] == 0 || mag[0] >= mag[1]) continue;
             // Автомат не даёт дозарядить, пока в магазине влезает меньше пачки (7 патронов).
             if (t == Items.Custom.AUTO && mag[1] - mag[0] < 7) continue;
@@ -3001,21 +3061,19 @@ public final class Bot {
         }
         eiNeedsReload = false;
         if (slot < 0 || !hold(p, slot, now)) return;
-        BotNms.look(p, motor.yaw(), -55f); // в небо, чтобы ЛКМ не попал по блоку
+        BotNms.look(p, motor.yaw(), -55f);
         motor.sync(p);
-        BotNms.swing(p);
-        busyUntil = now + time; // ствол держим в руке, пока идёт перезарядка
+        BotNms.clickAir(p);
+        // Патроны встают в магазин сразу по клику, дальше у ствола только задержка выстрела.
+        busyUntil = now + 6;
+        eiReloadUntil = now + time;
         eiDudUntil.clear();
     }
 
     /** Сколько тиков держать ствол в руке ради перезарядки. */
     private static int eiReloadTicks(Items.Custom t, int[] mag) {
-        if (t == Items.Custom.AUTO) {
-            int need = mag == null ? 35 : mag[1] - mag[0];
-            if (mag != null && mag[2] >= 0) need = Math.min(need, mag[2]);
-            return 25 + 20 * ((need + 6) / 7); // по 7 патронов в секунду
-        }
-        return 95; // дробовик: анимация ~4.4 сек
+        // И автомат, и дробовик заряжаются одним кликом, после него 5 сек ствол не стреляет.
+        return 104;
     }
 
     /**
@@ -3027,9 +3085,9 @@ public final class Bot {
         int[] mag = Items.eiMag(p.getInventory().getItemInMainHand());
         if (mag == null || mag[0] > 0) return false;
         if (mag[2] == 0) return true; // стрелять нечем, chooseWeapon сменит ствол
-        BotNms.look(p, motor.yaw(), -55f); // ЛКМ в воздух, а не по блоку или врагу
+        BotNms.look(p, motor.yaw(), -55f);
         motor.sync(p);
-        BotNms.swing(p);
+        BotNms.clickAir(p); // ЛКМ в воздух, даже если враг вплотную или над головой потолок
         eiReloadUntil = now + eiReloadTicks(t, mag);
         talk(p, BotChatter.Topic.T_RELOAD, 0.12, 20 * 45, null);
         if (skill.debug) mgr.debug(name + " перезаряжает " + t);
@@ -3081,11 +3139,25 @@ public final class Bot {
         // Освобождаем слот: самое дешёвое из хотбара - в рюкзак.
         int empty = -1;
         for (int i = 9; i < 36 && empty < 0; i++) if (inv.getItem(i) == null || inv.getItem(i).getType().isAir()) empty = i;
-        if (empty < 0) return -1;
-        int hs = cheapestHotbarSlot(p);
-        inv.setItem(empty, inv.getItem(hs));
-        inv.setItem(hs, null);
-        return hs;
+        if (empty >= 0) {
+            int hs = cheapestHotbarSlot(p);
+            inv.setItem(empty, inv.getItem(hs));
+            inv.setItem(hs, null);
+            return hs;
+        }
+        // Рюкзак полон: обычный предмет (блок, инструмент) бьёт как кулак.
+        for (int i = 0; i < 36; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it != null && !Items.isCustom(it)) return i;
+        }
+        return -1;
+    }
+
+    /** Этим можно бить: пустая рука, оружие ближнего боя или обычный предмет. Стволы и предметы плагинов - нет. */
+    private boolean punchable(ItemStack it) {
+        if (it == null || it.getType().isAir()) return true;
+        if (Items.kind(it, hooks) == Items.Kind.MELEE) return true;
+        return !it.hasItemMeta() || !Items.isCustom(it);
     }
 
     private static boolean isTool(Material m) {

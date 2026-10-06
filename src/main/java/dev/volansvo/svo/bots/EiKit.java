@@ -28,7 +28,7 @@ final class EiKit {
     enum Use {
         ROCKET,      // самонаводящаяся ракета (ПКМ), летит в ближайшего врага
         SNIPER,      // одноразовая снайперка: присед = выстрел
-        FLAMER,      // огнемёт: ЛКМ, не больше 5 выстрелов подряд (перегрев)
+        FLAMER,      // огнемёт: ЛКМ, на 8 очках нагрева (счёт ognemet) взрывается
         PULSE,       // пулемётик: ЛКМ, почти мгновенная стрела
         TNT_AHEAD,   // тикающая: ЛКМ, динамит в 3 блоках перед собой
         BLACKHOLE,   // чёрная дыра: ПКМ, летит вперёд и затягивает
@@ -182,6 +182,7 @@ final class EiKit {
 
     private boolean tryStart(Player p, int now, Use u) {
         if (!ready(u, now)) return false;
+        if (u == Use.FLAMER && flamerHeat(p, flamerShots) >= 6) { flamerShots = 0; cool(u, now, 20 * 8); return false; }
         int slot = find(p, u);
         if (slot < 0) return false;
         if (!hold.test(slot)) return false;
@@ -222,7 +223,7 @@ final class EiKit {
             case STIM: BotNms.useItem(p, false); cool(u, now, 20 * 36); break;
             case FATIGUE: BotNms.useItem(p, false); cool(u, now, 20 * 8); break;
             case ZEUS: BotNms.useItem(p, false); cool(u, now, 20 * 10); break;
-            case PULSE: BotNms.swing(p); cool(u, now, 14); break;
+            case PULSE: BotNms.clickAir(p); cool(u, now, 14); break;
             case SNIPER:
                 BotNms.sneak(p, false);
                 BotNms.sneak(p, true); // выстрел по нажатию приседа
@@ -230,12 +231,13 @@ final class EiKit {
                 cool(u, now, 40);
                 break;
             case FLAMER:
-                BotNms.swing(p);
-                if (++flamerShots >= 5) { flamerShots = 0; cool(u, now, 20 * 6); } // не перегреваем
+                BotNms.clickAir(p);
+                // Нагрев +1 за выстрел, -1 раз в 2 сек, на 8 огнемёт взрывается у лица.
+                if (flamerHeat(p, ++flamerShots) >= 6) { flamerShots = 0; cool(u, now, 20 * 8); }
                 else cool(u, now, 4);
                 break;
             case TNT_AHEAD: {
-                BotNms.swing(p);
+                BotNms.clickAir(p);
                 Vector f = new Vector(t.getX() - eye.getX(), 0, t.getZ() - eye.getZ());
                 if (f.lengthSquared() > 1e-6) f.normalize().multiply(3);
                 danger.accept(p.getLocation().add(f), 50); // динамит с запалом 2 сек - отходим
@@ -328,11 +330,19 @@ final class EiKit {
             inv.setItemInOffHand(pkt);
             BotNms.look(p, motor.yaw(), -55f); // клик в воздух
             motor.sync(p);
-            BotNms.swing(p);
+            BotNms.clickAir(p);
             restoreOffhandAt = now + 3;
             if (mgr.skill().debug) mgr.debug(name + " пополняет патроны " + ct);
             return;
         }
+    }
+
+    /** Нагрев огнемёта из счёта ognemet, который ведёт сам предмет (нет счёта - свой подсчёт). */
+    private static int flamerHeat(Player p, int fallback) {
+        org.bukkit.scoreboard.Objective o = org.bukkit.Bukkit.getScoreboardManager().getMainScoreboard().getObjective("ognemet");
+        if (o == null) return fallback;
+        org.bukkit.scoreboard.Score s = o.getScore(p.getName());
+        return s.isScoreSet() ? s.getScore() : 0;
     }
 
     /** Предметы, которые бот сам «пробовать» не должен (у них своё применение). */

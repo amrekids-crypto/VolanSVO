@@ -125,13 +125,16 @@ final class DronePilot {
         Location t = target.getLocation().add(lead(target).multiply(4));
         World w = pos.getWorld();
         double ground = w.isChunkLoaded(t.getBlockX() >> 4, t.getBlockZ() >> 4) ? w.getHighestBlockYAt(t) : t.getY();
-        double hoverY = Math.max(t.getY() + 14, ground + 6);
+        // Над холмом по пути тоже держим высоту: влетевший в блок дрон разбивается.
+        double here = w.getHighestBlockYAt(pos);
+        double hoverY = Math.max(Math.max(t.getY() + 14, ground + 6), here + 4);
         double dx = t.getX() - pos.getX(), dz = t.getZ() - pos.getZ();
         double flat = Math.sqrt(dx * dx + dz * dz);
         double step = Math.min(flat, 0.85);
         double nx = flat > 1e-3 ? pos.getX() + dx / flat * step : pos.getX();
         double nz = flat > 1e-3 ? pos.getZ() + dz / flat * step : pos.getZ();
         double ny = pos.getY() + Math.max(-1.0, Math.min(1.0, hoverY - pos.getY()));
+        if (blocked(w, nx, ny, nz)) { nx = pos.getX(); nz = pos.getZ(); ny = pos.getY() + 1.0; } // стена впереди - вверх
         BotNms.moveTo(p, nx, ny, nz, Motor.yawTo(dx, dz), 89f);
         if (flat < 0.9 && now >= nextDrop && Math.abs(pos.getY() - hoverY) < 3 && !teammateNear(t, 6)) {
             BotNms.pressJump(p, true); // прыжок с зажатым приседом = сброс бомбы вниз
@@ -139,6 +142,15 @@ final class DronePilot {
             nextDrop = now + 66; // кулдаун сброса 3 сек
         }
         prevTarget = target.getLocation();
+    }
+
+    /** В точке (x,y,z) тело дрона упрётся в твёрдый блок (ноги или голова). */
+    private static boolean blocked(World w, double x, double y, double z) {
+        for (double dy : new double[]{0.1, 1.0, 1.7}) {
+            org.bukkit.block.Block b = w.getBlockAt((int) Math.floor(x), (int) Math.floor(y + dy), (int) Math.floor(z));
+            if (b.getType().isSolid() && !b.isPassable()) return true;
+        }
+        return false;
     }
 
     /** Скорость цели (блоков за тик) для упреждения. */

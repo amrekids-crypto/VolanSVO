@@ -25,6 +25,9 @@ public final class BotMapRenderer extends MapRenderer {
     private final BotManager mgr;
     /** Курсоры, которые мы добавили на холст каждого зрителя (холсты у зрителей разные). */
     private final java.util.Map<UUID, List<MapCursor>> mine = new java.util.HashMap<UUID, List<MapCursor>>();
+    /** Несёт ли бот карту: сервер рисует карту каждый тик каждому, у кого она есть, а
+     *  перебор инвентарей всех ботов на каждого зрителя после аирдропа заметно грузил тик. */
+    private final java.util.Map<UUID, int[]> carryCache = new java.util.HashMap<UUID, int[]>();
 
     BotMapRenderer(BotManager mgr) {
         super(true); // свой набор курсоров на каждого зрителя (фильтр по миру)
@@ -33,6 +36,7 @@ public final class BotMapRenderer extends MapRenderer {
 
     @Override
     public void render(MapView map, MapCanvas canvas, Player viewer) {
+        if (mgr.isBot(viewer)) return; // боту карту не показывают, курсоры ему не нужны
         MapCursorCollection cursors = canvas.getCursors();
         List<MapCursor> own = mine.get(viewer.getUniqueId());
         if (own == null) { own = new ArrayList<MapCursor>(); mine.put(viewer.getUniqueId(), own); }
@@ -54,7 +58,7 @@ public final class BotMapRenderer extends MapRenderer {
             Player b = org.bukkit.Bukkit.getPlayer(id);
             if (b == null || b.isDead() || b.getGameMode() == GameMode.SPECTATOR) continue;
             if (mgr.sameTeamPublic(viewer.getUniqueId(), id)) continue; // уже нарисован зелёным
-            if (!b.getWorld().equals(viewer.getWorld()) || !carries(b, map.getId())) continue;
+            if (!b.getWorld().equals(viewer.getWorld()) || !carriesCached(b, map.getId())) continue;
             Location l = b.getLocation();
             int px = (int) Math.round((l.getX() - map.getCenterX()) * 2.0 / scale);
             int pz = (int) Math.round((l.getZ() - map.getCenterZ()) * 2.0 / scale);
@@ -74,6 +78,16 @@ public final class BotMapRenderer extends MapRenderer {
         float yaw = l.getYaw();
         int dir = ((int) ((yaw + (yaw < 0 ? -8.0 : 8.0)) * 16.0 / 360.0)) & 15;
         return new MapCursor((byte) px, (byte) pz, (byte) dir, type, true);
+    }
+
+    private boolean carriesCached(Player p, int mapId) {
+        int now = mgr.now();
+        int[] c = carryCache.get(p.getUniqueId());
+        if (c == null || c[1] != mapId || now - c[0] >= 10) {
+            c = new int[]{now, mapId, carries(p, mapId) ? 1 : 0};
+            carryCache.put(p.getUniqueId(), c);
+        }
+        return c[2] == 1;
     }
 
     private static boolean carries(Player p, int mapId) {

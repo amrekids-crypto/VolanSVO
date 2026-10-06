@@ -207,6 +207,32 @@ public final class BotNms {
         bot.connection.handleAnimate(new ServerboundSwingPacket(InteractionHand.MAIN_HAND));
     }
 
+    /**
+     * ЛКМ «в воздух» для плагинов (огнемёт, пулемётик, перезарядка стволов). Сервер шлёт
+     * LEFT_CLICK_AIR, только если луч взгляда ни во что не упёрся: враг вплотную или
+     * потолок над головой съедают клик, и предмет не срабатывает. Здесь событие уходит
+     * всегда, ровно один раз.
+     */
+    public static void clickAir(Player p) {
+        BotPlayer bot = handle(p);
+        if (bot == null) return;
+        Location eye = p.getEyeLocation();
+        double er = bot.entityInteractionRange();
+        org.bukkit.util.RayTraceResult r = p.getWorld().rayTrace(eye, eye.getDirection(),
+            Math.max(bot.blockInteractionRange(), er), org.bukkit.FluidCollisionMode.NEVER, false, 0.0, e -> {
+                net.minecraft.world.entity.Entity h = ((CraftEntity) e).getHandle();
+                return e != p && p.canSee(e) && !h.isSpectator() && h.isPickable() && !h.isPassengerOfSameVehicle(bot);
+            });
+        // Те же условия, при которых событие шлёт сам обработчик взмаха.
+        boolean serverFires = r == null || r.getHitEntity() != null
+            && eye.toVector().distanceSquared(r.getHitPosition()) > er * er;
+        if (!serverFires) {
+            org.bukkit.craftbukkit.event.CraftEventFactory.callPlayerInteractEvent(bot,
+                org.bukkit.event.block.Action.LEFT_CLICK_AIR, bot.getInventory().getSelected(), InteractionHand.MAIN_HAND);
+        }
+        bot.connection.handleAnimate(new ServerboundSwingPacket(InteractionHand.MAIN_HAND));
+    }
+
     public static void selectSlot(Player p, int slot) {
         BotPlayer bot = handle(p);
         if (bot == null || slot < 0 || slot > 8) return;

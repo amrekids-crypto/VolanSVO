@@ -81,6 +81,8 @@ public class VolanSVO extends JavaPlugin {
         // Очистка после краша/рестарта: сброс состояния, тегов, IsGameSvo, активной карты.
         gameManager.startupCleanup();
         gameManager.startGlobalWatcher();
+        // Дрон-бомбила: стойка «ДРОН» за игроком, конец полёта при влёте в блок.
+        new dev.volansvo.svo.managers.BombDroneGuard(this).runTaskTimer(this, 1L, 1L);
         getLogger().info("VolanSVO enabled.");
     }
 

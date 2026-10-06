@@ -107,6 +107,47 @@ public class AirdropManager {
         this.plugin = plugin;
     }
 
+    /** Чанки, которые держим тикетом плагина до конца игры (место дропа, шаблоны лута). */
+    private final java.util.Set<Long> heldChunks = new java.util.HashSet<Long>();
+    private World heldWorld;
+
+    private void holdChunkAsync(final World world, final int cx, final int cz) {
+        if (heldWorld != null && !heldWorld.equals(world)) releaseHeldChunks();
+        heldWorld = world;
+        if (!heldChunks.add(((long) cx << 32) ^ (cz & 0xffffffffL))) return;
+        world.getChunkAtAsync(cx, cz, true).thenAccept(c -> {
+            if (heldWorld == world) world.addPluginChunkTicket(cx, cz, plugin);
+        });
+    }
+
+    /** Чанк места падения держим до приземления (дальше его держит форслоад спуска). */
+    private World dropTicketWorld;
+    private int dropTicketX, dropTicketZ;
+
+    private void holdDropChunkAsync(final World world, final int cx, final int cz) {
+        releaseDropTicket();
+        dropTicketWorld = world; dropTicketX = cx; dropTicketZ = cz;
+        world.getChunkAtAsync(cx, cz, true).thenAccept(c -> {
+            if (dropTicketWorld == world && dropTicketX == cx && dropTicketZ == cz) world.addPluginChunkTicket(cx, cz, plugin);
+        });
+    }
+
+    private void releaseDropTicket() {
+        if (dropTicketWorld == null) return;
+        try { dropTicketWorld.removePluginChunkTicket(dropTicketX, dropTicketZ, plugin); } catch (Throwable ignored) {}
+        dropTicketWorld = null;
+    }
+
+    private void releaseHeldChunks() {
+        if (heldWorld != null) {
+            for (long k : heldChunks) {
+                try { heldWorld.removePluginChunkTicket((int) (k >> 32), (int) k, plugin); } catch (Throwable ignored) {}
+            }
+        }
+        heldChunks.clear();
+        heldWorld = null;
+    }
+
     /** Удерживает чанк аирдропа загруженным (снимая прошлый форслоад если был). */
     private void forceAirdropChunk(World world, int blockX, int blockZ) {
         unforceAirdropChunk();
@@ -120,6 +161,7 @@ public class AirdropManager {
 
     /** Снимает форслоад с чанка аирдропа. */
     private void unforceAirdropChunk() {
+        releaseDropTicket();
         if (!airdropChunkForced || forcedWorld == null) return;
         try { forcedWorld.setChunkForceLoaded(forcedCX, forcedCZ, false); } catch (Throwable ignored) {}
         airdropChunkForced = false;
@@ -143,10 +185,13 @@ public class AirdropManager {
         final double tz = cz + (rng.nextDouble() * 2 - 1) * half;
         final double ty = AIRDROP_START_Y;
 
-        world.loadChunk((int) tx >> 4, (int) tz >> 4, true);
-        for (int[] tmpl : AIRDROP_TEMPLATES) {
-            world.loadChunk(tmpl[0] >> 4, tmpl[2] >> 4, true);
-        }
+        // Чанки места падения и шаблона лута грузим в фоне (до появления дропа 3 сек) и
+        // держим тикетом: синхронная загрузка дальнего чанка давала пик тика в 100-200 мс.
+        holdDropChunkAsync(world, (int) tx >> 4, (int) tz >> 4);
+        dev.volansvo.svo.maps.MapData md = plugin.getMapManager().getActiveMap();
+        java.util.List<int[]> tmpls = md != null && md.hasAirdropTemplates()
+            ? md.getAirdropTemplates() : java.util.Arrays.asList(AIRDROP_TEMPLATES);
+        for (int[] tmpl : tmpls) holdChunkAsync(world, tmpl[0] >> 4, tmpl[2] >> 4);
 
         // Звук пролетающего истребителя - играем СЕЙЧАС, за AIRDROP_SOUND_LEAD_TICKS (3 сек)
         // ДО того как сам аирдроп реально появится (сообщение/самолёт/ящик, см. ниже).
@@ -261,6 +306,7 @@ public class AirdropManager {
                 // Партикл-след отправляем КАЖДОМУ игроку индивидуально - минует view distance
                 if (ticks % 2 == 0) {
                     for (Player viewer : world.getPlayers()) {
+                        if (plugin.getGameManager().isBot(viewer.getUniqueId())) continue;
                         viewer.spawnParticle(Particle.CRIT, nl.getX(), nl.getY() + 10, nl.getZ(),
                             30, 0, 5, 0, 0, null, true);
                         viewer.spawnParticle(Particle.CLOUD, nl.getX(), nl.getY(), nl.getZ(),
@@ -271,6 +317,7 @@ public class AirdropManager {
                 // Столб партиклов от airpig до пола - каждому игроку, force=true чтобы видно издалека
                 int curY = (int) Math.floor(y);
                 for (Player viewer : world.getPlayers()) {
+                    if (plugin.getGameManager().isBot(viewer.getUniqueId())) continue;
                     for (int py = floorY; py <= curY; py += 2) {
                         viewer.spawnParticle(Particle.SMOKE,
                             tx + 0.5, py + 0.5, tz + 0.5,
@@ -335,6 +382,7 @@ public class AirdropManager {
     private void spawnPlanesForPlayers(final World world, final double tx, final double tz) {
         for (final Player player : plugin.getGameManager().getActivePlayers()) {
             if (player == null || !player.isOnline() || !player.getWorld().equals(world)) continue;
+            if (plugin.getGameManager().isBot(player.getUniqueId())) continue;
 
             final Location ploc = player.getLocation();
             double ddx = tx - ploc.getX();
@@ -499,11 +547,6 @@ public class AirdropManager {
         for (BlockDisplay bd : parts) {
             if (bd == null) continue;
             try {
-                if (!bd.isValid()) {
-                    Location l = bd.getLocation();
-                    World w = l.getWorld();
-                    if (w != null) w.getChunkAt(l); // подгружаем чанк, чтобы remove() отработал
-                }
                 activeEntities.remove(bd);
                 bd.remove();
             } catch (Throwable ignored) {}
@@ -706,6 +749,8 @@ public class AirdropManager {
 
     public void cleanupEntities() {
         lastLanded = null;
+        releaseHeldChunks();
+        releaseDropTicket();
         for (Entity e : activeEntities) if (e.isValid()) e.remove();
         activeEntities.clear();
         plugin.getLootManager().clearAirdropCursor();

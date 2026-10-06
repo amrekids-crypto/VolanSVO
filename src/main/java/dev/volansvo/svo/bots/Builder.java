@@ -106,6 +106,13 @@ final class Builder {
         return true;
     }
 
+    /** Доломать начатый блок, если он ещё стоит и до него достаём. true - ломаем. */
+    boolean resumeMining(Player p, int now) {
+        if (mining == null) return false;
+        if (!mining.getType().isSolid()) { stopMining(p); return false; }
+        return mine(p, mining, now);
+    }
+
     void stopMining(Player p) {
         if (mining != null && p != null) crack(p, mining, 0f);
         mining = null;
