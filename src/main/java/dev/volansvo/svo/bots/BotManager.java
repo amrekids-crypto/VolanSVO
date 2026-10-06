@@ -179,6 +179,10 @@ public final class BotManager implements Listener {
             p.addScoreboardTag("svobot");
             limitChunks(p);
             authLogin(p);
+            // ExecutableItems молча не запускает предмет без права на него (у людей права даёт
+            // плагин прав или OP, у ботов их нет): огнемёт, калаш и дроны в руках бота молчали.
+            p.addAttachment(plugin, "ei.item.*", true);
+            p.addAttachment(plugin, "executableitems.item.*", true);
             bots.put(uid, new Bot(this, hooks, skill, uid, name));
             return p;
         } catch (Throwable t) {

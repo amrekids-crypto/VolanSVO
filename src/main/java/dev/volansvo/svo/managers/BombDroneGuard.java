@@ -11,6 +11,11 @@ import org.bukkit.block.Block;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerItemHeldEvent;
+import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scoreboard.Objective;
@@ -28,9 +33,12 @@ import java.util.UUID;
  * блок игрок висел в текстурах до конца таймера. Здесь:
  *  - стойка «ДРОН» летит за игроком и пропадает после полёта;
  *  - влетел в твёрдый блок или летает дольше 16 сек: полёт заканчивается так же, как при
- *    отпускании приседа (игрок у тела, в выживании, стойки убраны, заряд списан).
+ *    отпускании приседа (игрок у тела, в выживании, стойки убраны, заряд списан);
+ *  - в полёте (бомбила и FPV) слот не переключается: команды предмета работают только из
+ *    главной руки, и после переключения отпущенный Shift не возвращал к телу, а заряд
+ *    списывался с другого слота, и дрон оставался в инвентаре навсегда.
  */
-public final class BombDroneGuard extends BukkitRunnable {
+public final class BombDroneGuard extends BukkitRunnable implements Listener {
 
     private static final int MAX_TICKS = 20 * 16;
     private static final int CRASH_GRACE = 20; // после взлёта секунда, чтобы выйти из потолка
@@ -47,6 +55,21 @@ public final class BombDroneGuard extends BukkitRunnable {
 
     public BombDroneGuard(VolanSVO plugin) {
         this.plugin = plugin;
+    }
+
+    private static boolean flying(Player p) {
+        Set<String> tags = p.getScoreboardTags();
+        return p.getGameMode() == GameMode.SPECTATOR && (tags.contains("bombfly") || tags.contains("fpvfly"));
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onSlot(PlayerItemHeldEvent e) {
+        if (flying(e.getPlayer())) e.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
+    public void onSwap(PlayerSwapHandItemsEvent e) {
+        if (flying(e.getPlayer())) e.setCancelled(true);
     }
 
     @Override

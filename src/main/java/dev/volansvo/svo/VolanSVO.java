@@ -82,7 +82,9 @@ public class VolanSVO extends JavaPlugin {
         gameManager.startupCleanup();
         gameManager.startGlobalWatcher();
         // Дрон-бомбила: стойка «ДРОН» за игроком, конец полёта при влёте в блок.
-        new dev.volansvo.svo.managers.BombDroneGuard(this).runTaskTimer(this, 1L, 1L);
+        dev.volansvo.svo.managers.BombDroneGuard droneGuard = new dev.volansvo.svo.managers.BombDroneGuard(this);
+        droneGuard.runTaskTimer(this, 1L, 1L);
+        getServer().getPluginManager().registerEvents(droneGuard, this);
         getLogger().info("VolanSVO enabled.");
     }
 
