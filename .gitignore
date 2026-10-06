@@ -1,0 +1,11 @@
+# Сборка
+target/
+# Jar сервера Paper и библиотеки для компиляции (код Mojang/Paper - не выкладываем, см. README)
+devlibs/
+# Архивы и временное
+*.rar
+*.zip
+*.log
+.idea/
+*.iml
+.vscode/

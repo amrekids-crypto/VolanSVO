@@ -1,0 +1,43 @@
+name: VolanSVO
+version: 1.0.0
+main: dev.volansvo.svo.VolanSVO
+api-version: 1.21
+authors: [Kirqum]
+
+commands:
+  svolobby:
+    description: Зайти в лобби СВО
+  svoplay:
+    description: Запустить раунд
+    usage: /svoplay <карта> <жизни> <время(мин)> <с жириновским?> <с подсветкой?> <быстрая зона?> <С аирдропами?> <одиночный|дуо|трио>
+  svostats:
+    description: Статистика
+  svolaunch:
+    description: Запуск ракеты
+    usage: /svolaunch <washington|kyiv|moscow|lnr>
+  svovote:
+    description: ""
+  svowatch:
+    description: Наблюдать за идущей игрой
+  svoteam:
+    description: Меню выбора команды (дуо/трио)
+    usage: /svoteam [approve|leave|ready] <ник>
+  asvorazboi:
+    description: Заспавнить разбойников
+    usage: /asvorazboi <топорщики> <арбалетчики>
+  asvostop:
+    description: Остановить и удалить мир
+  asvoyanyk:
+    description: Заспавнить Яника
+  asvotptolobbyst:
+    description: Создать стенд-портал в лобби
+    usage: /asvotptolobbyst [x y z]
+  asvonew:
+    description: Создать новую карту СВО
+    usage: /asvonew <id> <world> <display-name>
+  asvomap:
+    description: Настроить параметры карты
+    usage: /asvomap warden|spawnbox|border|validate|list|delete
+  asvobot:
+    description: Боты СВО (список/удалить всех/перечитать настройки)
+    usage: /asvobot [list|removeall|reload]
