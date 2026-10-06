@@ -2990,6 +2990,7 @@ public class GameManager {
                 }
 
                 for (SvoPlayer w : winners) {
+                    if (isBot(w.getUuid())) { try { plugin.getBotManager().onWin(w.getUuid()); } catch (Throwable ignored) {} }
                     if (!statsCounted || isBot(w.getUuid())) continue; // боты и игры против ботов не в статистике
                     w.recordWin();
                     plugin.getStatsManager().save(w);

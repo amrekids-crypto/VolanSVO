@@ -213,6 +213,11 @@ public final class Bot {
     /** Бота ударили. */
     void onDamaged(Entity attacker, double damage, int now) {
         lastHurt = now;
+        Player me = player();
+        if (me != null && !lowHpSaid && me.getHealth() - damage <= 6 && me.getHealth() - damage > 0) {
+            lowHpSaid = true;
+            mgr.teamSay(me, BotChatter.Topic.T_LOW_HP, 0.5); // просим аптечку у своих
+        }
         if (learnKey != null && (attacker == null || attacker.getUniqueId().equals(id)
                 || attacker instanceof TNTPrimed || attacker instanceof Explosive)) {
             learnSelfDamage += damage;
@@ -253,6 +258,8 @@ public final class Bot {
 
     /** Союзник дерётся (его бьют или он бьёт) - подтянуться к нему и помочь. */
     void allyInFight(Player ally, int now) {
+        Player me = player();
+        if (me != null && (helpAlly == null || now >= helpUntil)) talk(me, BotChatter.Topic.T_HELP, 0.35, 20 * 60, null);
         helpAlly = ally;
         helpUntil = now + 20 * 15;
     }
@@ -267,6 +274,8 @@ public final class Bot {
 
     void onDeath() {
         deaths++;
+        dropSaid = false;
+        zoneSaid = false;
         target = null;
         contacts.clear();
         nav.clear();
@@ -342,6 +351,25 @@ public final class Bot {
         } catch (Throwable t) { mgr.warn("extras " + name, t); }
         goal = decide(p, now);
         watchdog(p, now);
+        if (p.getHealth() > 14) lowHpSaid = false;
+        if (goal == Goal.DROP && !dropSaid) { dropSaid = true; talk(p, BotChatter.Topic.DROP, 0.18, 0, null); }
+        if (goal == Goal.ZONE && !zoneSaid) { zoneSaid = true; talk(p, BotChatter.Topic.ZONE, 0.12, 0, null); }
+        if (goal != lastGoal) {
+            switch (goal) {
+                case AIRDROP: talk(p, BotChatter.Topic.AIRDROP, 0.25, 20 * 120, null); break;
+                case NUKE: talk(p, BotChatter.Topic.NUKE, 0.9, 20 * 60, null); break;
+                case CAVE: talk(p, BotChatter.Topic.T_CAVE, 0.4, 20 * 90, null); break;
+                case AVOID_WARDEN: talk(p, BotChatter.Topic.T_WARDEN, 0.3, 20 * 120, null); break;
+                case EVADE: talk(p, BotChatter.Topic.T_EVADE, 0.12, 20 * 40, null); break;
+                case HEAL: talk(p, BotChatter.Topic.T_HEAL, 0.08, 20 * 60, null); break;
+                case DODGE: talk(p, BotChatter.Topic.T_DODGE, 0.25, 20 * 30, null); break;
+                case CHASE:
+                    if (target != null && target.entity instanceof Player) talk(p, BotChatter.Topic.CHASE, 0.05, 20 * 90, target.entity.getName());
+                    break;
+                default:
+            }
+            lastGoal = goal;
+        }
         if (now >= nextEiMaintain && now >= busyUntil) {
             nextEiMaintain = now + 40;
             try { eikit.maintain(p, now, target == null || !target.visible); } catch (Throwable t) { mgr.warn("ei " + name, t); }
@@ -633,6 +661,7 @@ public final class Bot {
         // 12. Сундуки. Чем лучше снаряжён, тем ближе ищем.
         boolean geared = (hasGun(p) || findEi(p, Items.Custom.AUTO, now) >= 0) && armorTotal(p) >= 12 && countHeals(p) >= 2;
         double chestRadius = geared ? 28 : (armorTotal(p) < 4 ? 110 : 72); // без брони - ищем дальше
+        if (now < lootOrderUntil) chestRadius = 120;                          // приказ «лутать»
         int[] c = chest != null && goal == Goal.LOOT && !searched.contains(key(chest)) ? chest : findChest(p, chestRadius);
         if (c != null) { chest = c; return Goal.LOOT; }
 
@@ -1408,6 +1437,8 @@ public final class Bot {
     private void setTarget(Contact c) {
         if (target == c) return;
         target = c;
+        Player me = player();
+        if (me != null && c.entity instanceof Player && c.visible) talk(me, BotChatter.Topic.SEE_ENEMY, 0.06, 20 * 60, c.entity.getName());
         // Время реакции: человек не стреляет в ту же миллисекунду, как увидел.
         reactionLeft = Math.max(1, (int) Math.round(skill.reactionTicks * (0.7 + rnd.nextDouble() * 0.7)));
         nav.clear();
@@ -1504,6 +1535,7 @@ public final class Bot {
             Items.Kind k = Items.kind(it, hooks);
             if (!wantsMore(p, it)) continue;
             if (inv.firstEmpty() < 0) dropWorst(p, v);
+            if (v >= 45) talk(p, BotChatter.Topic.GOOD_LOOT, 0.25, 20 * 90, null);
             Map<Integer, ItemStack> left = inv.addItem(it.clone());
             if (left.isEmpty()) from.setItem(i, null);
             else from.setItem(i, left.values().iterator().next());
@@ -1527,8 +1559,45 @@ public final class Bot {
         }
     }
 
+    /** Бочки (и сундуки не из списка карты) рядом, где лежит что-то ценное. */
+    private final List<int[]> extraContainers = new ArrayList<int[]>();
+    private int nextContainerScan;
+
+    private void scanContainers(Player p, int now) {
+        if (now < nextContainerScan) return;
+        nextContainerScan = now + 200;
+        extraContainers.clear();
+        World w = p.getWorld();
+        int cx = p.getLocation().getBlockX() >> 4, cz = p.getLocation().getBlockZ() >> 4;
+        Set<Long> known = new HashSet<Long>();
+        int[][] list = hooks.chests();
+        if (list != null) for (int[] c : list) known.add(key(c));
+        for (int dx = -3; dx <= 3; dx++) {
+            for (int dz = -3; dz <= 3; dz++) {
+                if (!w.isChunkLoaded(cx + dx, cz + dz)) continue;
+                for (BlockState st : w.getChunkAt(cx + dx, cz + dz).getTileEntities(false)) {
+                    if (!(st instanceof org.bukkit.block.Barrel) && !(st instanceof org.bukkit.block.Chest)) continue;
+                    int[] c = {st.getX(), st.getY(), st.getZ()};
+                    if (known.contains(key(c)) || searched.contains(key(c))) continue;
+                    double v = 0;
+                    for (ItemStack it : ((Container) st).getInventory().getContents()) if (it != null) v += pickupWorth(p, it);
+                    if (v >= 12) extraContainers.add(c); // только если там правда что-то полезное
+                }
+            }
+        }
+    }
+
     private int[] findChest(Player p, double radius) {
-        int[][] all = hooks.chests();
+        try { scanContainers(p, mgr.now()); } catch (Throwable ignored) {}
+        int[][] base = hooks.chests();
+        int[][] all;
+        if (extraContainers.isEmpty()) all = base;
+        else {
+            int n = base == null ? 0 : base.length;
+            all = new int[n + extraContainers.size()][];
+            for (int i = 0; i < n; i++) all[i] = base[i];
+            for (int i = 0; i < extraContainers.size(); i++) all[n + i] = extraContainers.get(i);
+        }
         if (all == null || all.length == 0) return null;
         World w = p.getWorld();
         Location me = p.getLocation();
@@ -1882,6 +1951,7 @@ public final class Bot {
         motor.sync(p);
         BotNms.attack(p, best);
         nextRocketHit = now + 4;
+        talk(p, BotChatter.Topic.ROCKET_BLOCKED, 0.35, 20 * 60, null);
         if (skill.debug) mgr.debug(name + " сбивает ракету " + best.getType());
         return true;
     }
@@ -1913,6 +1983,24 @@ public final class Bot {
     }
 
     private Location holdPoint;
+    private Player lootCommander;
+    private int lootOrderUntil, nextLootDelivery;
+    private boolean lowHpSaid, dropSaid, zoneSaid;
+    private Goal lastGoal;
+    private final Map<BotChatter.Topic, Integer> saidAt = new HashMap<BotChatter.Topic, Integer>();
+
+    /**
+     * Сказать что-нибудь по теме: T_* - своим в командный чат, остальное - всем в мире.
+     * cooldown - не чаще, чем раз в столько тиков (на этого бота).
+     */
+    void talk(Player p, BotChatter.Topic t, double chance, int cooldown, String victim) {
+        int now = mgr.now();
+        Integer last = saidAt.get(t);
+        if (last != null && now - last < cooldown) return;
+        saidAt.put(t, now);
+        if (t.name().startsWith("T_")) mgr.teamSay(p, t, chance);
+        else mgr.chat(p, t, chance, name, victim);
+    }
     private int seenOrder = -1;
 
     /**
@@ -1949,6 +2037,11 @@ public final class Bot {
                 helpAlly = cmd;
                 helpUntil = now + 40;
                 return Goal.FOLLOW;
+            }
+            case LOOT: {
+                // Лутаем как обычно, но хорошее носим командиру (см. teamwork).
+                if (cmd != null && cmd.isOnline()) { lootCommander = cmd; lootOrderUntil = now + 60; }
+                return null;
             }
             case HOLD: {
                 if (o.hold == null || !o.hold.getWorld().equals(p.getWorld())) return null;
@@ -2069,7 +2162,7 @@ public final class Bot {
             if (junk >= 0) {
                 ItemStack it = inv.getItem(junk);
                 inv.setItem(junk, null);
-                toss(p, it, p.getLocation().getDirection(), false);
+                tossAway(p, it);
                 nextJunkDrop = nowT + 30;
             }
         }
@@ -2637,6 +2730,7 @@ public final class Bot {
         motor.stop(p);
         if (skill.debug) mgr.debug(name + " запускает " + (useFpv ? "FPV" : "Bombsender") + " на " + tgt.getName());
         pilot.launch(p, useFpv, tgt, now);
+        talk(p, BotChatter.Topic.PILOT, 0.3, 20 * 120, null);
     }
 
     /**
@@ -2807,6 +2901,7 @@ public final class Bot {
         motor.sync(p);
         BotNms.swing(p);
         eiReloadUntil = now + eiReloadTicks(t, mag);
+        talk(p, BotChatter.Topic.T_RELOAD, 0.12, 20 * 45, null);
         if (skill.debug) mgr.debug(name + " перезаряжает " + t);
         return true;
     }
@@ -2827,6 +2922,7 @@ public final class Bot {
         if (target != null && target.visible && target.last.distance(p.getLocation()) < 8) return;
         if (!hold(p, slot, now)) return;
         BotNms.useItem(p, false);
+        talk(p, BotChatter.Topic.DRONE, 0.3, 20 * 120, null);
         if (skill.debug) mgr.debug(name + " запускает дрон, ближайший враг " + nearest.getName());
         nextDrone = now + 20 * 115;
         busyUntil = now + 6;
@@ -2949,6 +3045,28 @@ public final class Bot {
     private int now() { return mgr.now(); }
 
     /** Выбросить предмет перед собой (или в сторону тиммейта). */
+    /** Выбросить ненужное: в сторону от людей рядом и подальше, чтобы не мешалось. */
+    private void tossAway(Player p, ItemStack it) {
+        Location me = p.getLocation();
+        Vector away = null;
+        double bd = 12 * 12;
+        for (Player o : p.getWorld().getPlayers()) {
+            if (o.equals(p) || o.getGameMode() == GameMode.SPECTATOR) continue;
+            double d = o.getLocation().distanceSquared(me);
+            if (d < bd) { bd = d; away = me.toVector().subtract(o.getLocation().toVector()).setY(0); }
+        }
+        if (away == null || away.lengthSquared() < 1e-4) {
+            away = me.getDirection().setY(0).rotateAroundY(Math.toRadians(rnd.nextBoolean() ? 90 : -90));
+        }
+        if (away.lengthSquared() < 1e-4) away = new Vector(1, 0, 0);
+        away.normalize();
+        float yaw = Motor.yawTo(away.getX(), away.getZ());
+        BotNms.look(p, yaw, -15f);
+        motor.sync(p);
+        Item drop = toss(p, it, away, false);
+        drop.setVelocity(away.clone().multiply(0.55).add(new Vector(0, 0.28, 0))); // улетает блоков на 4-5
+    }
+
     private Item toss(Player p, ItemStack it, Vector dir, boolean gift) {
         Location eye = p.getEyeLocation();
         Item drop = p.getWorld().dropItem(eye.clone().add(0, -0.3, 0), it);
@@ -2984,6 +3102,23 @@ public final class Bot {
             return;
         }
         if (target != null && target.visible && target.last.distance(p.getLocation()) < 30) return;
+        // Приказ «лутать»: хорошее несём командиру, оставляя себе не меньше 30%.
+        Player cmd = lootCommander;
+        if (now < lootOrderUntil && now >= nextLootDelivery && cmd != null && cmd.isOnline() && !cmd.isDead()
+                && cmd.getGameMode() == GameMode.SURVIVAL && cmd.getWorld().equals(p.getWorld())
+                && cmd.getLocation().distance(p.getLocation()) < 150) {
+            List<ItemStack> give = generousGive(p, cmd);
+            double v = 0;
+            for (ItemStack it : give) v += value(it);
+            if (v >= 25) {
+                shareTo = cmd;
+                shareItems.clear();
+                shareItems.addAll(give);
+                shareSince = now;
+                nextLootDelivery = now + 20 * 45;
+                return;
+            }
+        }
         for (Player mate : teammates(p)) {
             if (mate.getLocation().distance(p.getLocation()) > 35) continue;
             List<ItemStack> give = whatToGive(p, mate);
@@ -2993,6 +3128,83 @@ public final class Bot {
             shareItems.addAll(give);
             shareSince = now;
             return;
+        }
+    }
+
+    /**
+     * Что отдать командиру по приказу «лутать»: всё, что ему пригодится (броня лучше его,
+     * оружие, которого у него нет, хил, еда, патроны...), но себе оставляем хотя бы 30%
+     * ценности и своё лучшее оружие.
+     */
+    private List<ItemStack> generousGive(Player me, Player mate) {
+        List<ItemStack> out = new ArrayList<ItemStack>(whatToGive(me, mate));
+        PlayerInventory inv = me.getInventory();
+        double total = 0;
+        List<ItemStack> all = new ArrayList<ItemStack>();
+        for (int i = 0; i < 36; i++) { ItemStack it = inv.getItem(i); if (it != null && !it.getType().isAir()) all.add(it); }
+        for (ItemStack it : inv.getArmorContents()) if (it != null && !it.getType().isAir()) all.add(it);
+        for (ItemStack it : all) total += value(it);
+        double given = 0;
+        for (ItemStack it : out) given += value(it);
+        double keep = total * 0.3;
+        int myBest = bestMelee(me), myGun = findGun(me);
+        all.sort((a, b) -> Double.compare(value(b), value(a)));
+        java.util.Set<String> kinds = new java.util.HashSet<String>();
+        for (ItemStack it : all) {
+            double v = value(it);
+            if (v <= 1 || hooks.isNukeButton(it) || it.getType() == Material.FILLED_MAP) continue;
+            if (myBest >= 0 && it.equals(inv.getItem(myBest)) && myGun < 0) continue; // единственное оружие - себе
+            if (myGun >= 0 && it.equals(inv.getItem(myGun))) continue;                  // свой ствол - себе
+            if (total - given - v < keep) continue;
+            if (!usefulFor(mate, it)) continue;
+            String k = Items.kind(it, hooks) + ":" + (Items.isArmor(it.getType()) ? Items.armorSlot(it.getType()) : "");
+            if (!kinds.add(k) && Items.kind(it, hooks) != Items.Kind.FOOD) continue; // по одному каждого вида
+            ItemStack c = it.clone();
+            if (Items.kind(it, hooks) == Items.Kind.FOOD) c.setAmount(Math.max(1, Math.min(c.getAmount(), 8)));
+            out.add(c);
+            given += value(c);
+        }
+        return out;
+    }
+
+    /** Пригодится ли предмет союзнику (у него нет такого или есть хуже, и ему этого не хватает). */
+    private boolean usefulFor(Player mate, ItemStack it) {
+        PlayerInventory inv = mate.getInventory();
+        Items.Kind k = Items.kind(it, hooks);
+        switch (k) {
+            case ARMOR: {
+                EquipmentSlot s = Items.armorSlot(it.getType());
+                return s != null && Items.armorValue(it) > Items.armorValue(inv.getItem(s)) + 0.5;
+            }
+            case MELEE: {
+                int m = bestMelee(mate);
+                return m < 0 || Items.meleeDps(it) > Items.meleeDps(inv.getItem(m)) + 0.5;
+            }
+            case GUN: case LAUNCHER: case SPRAYER: case BOW: case CROSSBOW: case TRIDENT: case SHIELD:
+                return find(mate, k) < 0;
+            case HEAL: return countKind(mate, Items.Kind.HEAL) < 3;
+            case FOOD: return countKind(mate, Items.Kind.FOOD) < 8;
+            case THROW_DAMAGE: return countKind(mate, Items.Kind.THROW_DAMAGE) < 3;
+            case TOTEM: return find(mate, Items.Kind.TOTEM) < 0 && (inv.getItemInOffHand() == null || inv.getItemInOffHand().getType() != Material.TOTEM_OF_UNDYING);
+            case PEARL: return countKind(mate, Items.Kind.PEARL) < 4;
+            case CUSTOM: {
+                Items.Custom c = Items.customType(it);
+                if (c == Items.Custom.AMMO) return hasAnyGun(mate) && countCustom(mate, Items.Custom.AMMO) < 30;
+                if (c != Items.Custom.UNKNOWN) return findCustom(mate, c) < 0;
+                EiKit.Use u = EiKit.use(it);
+                if (u != null) {
+                    for (ItemStack o : inv.getContents()) if (EiKit.use(o) == u) return false;
+                    return true;
+                }
+                if (Rides.vehicleItem(it) != null) {
+                    for (ItemStack o : inv.getContents()) if (Rides.vehicleItem(o) != null) return false;
+                    return true;
+                }
+                return false;
+            }
+            default:
+                if (isArrow(it.getType())) return (find(mate, Items.Kind.BOW) >= 0 || find(mate, Items.Kind.CROSSBOW) >= 0) && countArrows(mate) < 32;
+                return false;
         }
     }
 
@@ -3035,25 +3247,15 @@ public final class Bot {
             Motor.pitchTo(to.getX() - eye.getX(), to.getY() - eye.getY(), to.getZ() - eye.getZ()));
         motor.sync(p);
         boolean gave = false;
-        boolean hand = p.getLocation().distance(mate.getLocation()) <= 3.6;
         for (ItemStack want : shareItems) {
             ItemStack taken = takeFromInventory(p, want);
             if (taken == null) continue;
-            if (hand) {
-                // Рядом - отдаём прямо в инвентарь, что не влезло - под ноги.
-                for (ItemStack left : mate.getInventory().addItem(taken).values()) {
-                    Item drop = toss(p, left, to.toVector().subtract(eye.toVector()), true);
-                    drop.setVelocity(lob(drop.getLocation(), to));
-                }
-                BotNms.swing(p);
-                mate.playSound(mate.getLocation(), org.bukkit.Sound.ENTITY_ITEM_PICKUP, 0.6f, 1.2f);
-            } else {
-                Item drop = toss(p, taken, to.toVector().subtract(eye.toVector()), true);
-                drop.setVelocity(lob(drop.getLocation(), to));
-            }
+            // Кидаем в руки: предмет падает игроку под ноги.
+            Item drop = toss(p, taken, to.toVector().subtract(eye.toVector()), true);
+            drop.setVelocity(lob(drop.getLocation(), to));
             gave = true;
         }
-        if (gave) mgr.say(p, new String[]{"держи", "на", "лови", "бери"}, 0.4);
+        if (gave) talk(p, mate.equals(lootCommander) ? BotChatter.Topic.T_LOOT_TO_YOU : BotChatter.Topic.T_SHARE, 0.45, 0, null);
         shareTo = null;
         shareItems.clear();
     }
@@ -3085,6 +3287,15 @@ public final class Bot {
             need -= n;
             if (n >= it.getAmount()) inv.setItem(i, null);
             else it.setAmount(it.getAmount() - n);
+        }
+        if (need > 0 && Items.isArmor(want.getType())) {
+            EquipmentSlot s = Items.armorSlot(want.getType());
+            ItemStack worn = s == null ? null : inv.getItem(s);
+            if (worn != null && worn.isSimilar(want)) {
+                result = worn.clone();
+                inv.setItem(s, null);
+                need = 0;
+            }
         }
         return result != null && result.getAmount() > 0 ? result : null;
     }

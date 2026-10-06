@@ -180,6 +180,7 @@ final class Rides {
             carId = id;
             carKind = kindOf(seatId(p.getVehicle()));
             mode = wantDriver && mode == Mode.CAR_WALK ? Mode.CAR_DRIVE : Mode.CAR_RIDE;
+            mgr.teamSay(p, BotChatter.Topic.T_VEHICLE, 0.3);
             since = now;
             lastPos = p.getLocation();
             lastPosTick = now;
@@ -272,7 +273,11 @@ final class Rides {
 
     private boolean zipJump(Player p, int now) {
         lookAlongRope(p);
-        if (!p.hasGravity()) { mode = Mode.ZIP_RIDE; since = now; BotNms.input(p, 0f, 0f, false); return true; }
+        if (!p.hasGravity()) {
+            mode = Mode.ZIP_RIDE; since = now; BotNms.input(p, 0f, 0f, false);
+            mgr.chat(p, BotChatter.Topic.ZIPLINE, 0.25, null, null);
+            return true;
+        }
         if (now - since > 12) {
             if (++jumps > 3) { banZip(now); mode = Mode.NONE; BotNms.input(p, 0f, 0f, false); return false; }
             since = now;

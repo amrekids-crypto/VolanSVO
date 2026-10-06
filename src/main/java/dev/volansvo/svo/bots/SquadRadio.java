@@ -45,6 +45,7 @@ public final class SquadRadio implements Listener {
         AUTO("Автономно", "Боты действуют сами"),
         FOLLOW("За мной", "Боты держатся рядом и прикрывают"),
         HOLD("Держать позицию", "Боты стоят здесь и отстреливаются"),
+        LOOT("Лутать", "Боты лутают и приносят тебе хорошие вещи"),
         ATTACK("Атаковать цель", "Боты идут на указанного врага");
 
         final String title, hint;
@@ -96,7 +97,7 @@ public final class SquadRadio implements Listener {
         m.setDisplayName(ChatColor.GOLD + "" + ChatColor.BOLD + "Рация отряда" + ChatColor.GRAY + " - " + ChatColor.YELLOW + mode.title);
         m.setLore(Arrays.asList(
             ChatColor.GRAY + "ПКМ - сменить приказ ботам",
-            ChatColor.GRAY + "   (автономно / за мной / держать позицию)",
+            ChatColor.GRAY + "   (автономно / за мной / держать позицию / лутать)",
             ChatColor.GRAY + "ЛКМ - атаковать врага, на которого смотришь",
             ChatColor.DARK_GRAY + "Выкинуть нельзя"));
         m.getPersistentDataContainer().set(key, PersistentDataType.BYTE, (byte) 1);
@@ -166,6 +167,7 @@ public final class SquadRadio implements Listener {
             switch (o.mode) {
                 case AUTO: next = Mode.FOLLOW; break;
                 case FOLLOW: next = Mode.HOLD; break;
+                case HOLD: next = Mode.LOOT; break;
                 default: next = Mode.AUTO; break;
             }
             o.mode = next;
@@ -184,7 +186,7 @@ public final class SquadRadio implements Listener {
         for (UUID b : bots.botIds()) {
             if (hooks.teamIdOf(b) != team) continue;
             Player bp = Bukkit.getPlayer(b);
-            if (bp != null && hooks.inGame(b)) bots.say(bp, new String[]{"понял", "принял", "есть", "ок", "+"}, 0.6);
+            if (bp != null && hooks.inGame(b)) bots.teamSay(bp, BotChatter.Topic.T_ACK, 0.6);
         }
     }
 

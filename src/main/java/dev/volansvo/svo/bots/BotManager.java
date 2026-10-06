@@ -61,8 +61,6 @@ public final class BotManager implements Listener {
         "Soldier", "Sniper", "Army", "Military", "Commando", "Ranger", "Spetsnaz", "Tankist", "Partisan",
         "Mercenary", "Survivor", "Hunter", "Ghost", "Raider", "Trooper", "Gunner"
     };
-    private static final String[] KILL_CHAT = {"gg", "изи", "ez", "минус один", "лол", "сорян", "+1"};
-    private static final String[] DEATH_CHAT = {"бл", "лаг", "гг", "ну норм", "читер?", "ладно", "ааа"};
 
     private final VolanSVO plugin;
     private final VolanHooks hooks;
@@ -262,7 +260,7 @@ public final class BotManager implements Listener {
             b.cpuNanos += System.nanoTime() - t0;
         }
         secNanos += System.nanoTime() - start;
-        if (tick % 20 == 0) adaptLoad();
+        if (tick % 20 == 0) { adaptLoad(); chatterTick(); }
     }
 
     // ===================================================================== нагрузка
@@ -387,9 +385,14 @@ public final class BotManager implements Listener {
             Bot kb = bots.get(killer.getUniqueId());
             if (kb != null) {
                 kb.onKill(dead);
-                maybeChat(killer, KILL_CHAT, 0.25);
+                boolean revenge = false;
+                for (Map.Entry<UUID, UUID> en : recentKills.entrySet()) {
+                    if (dead.getUniqueId().equals(en.getValue()) && hooks.sameTeam(killer.getUniqueId(), en.getKey())) { revenge = true; break; }
+                }
+                chat(killer, revenge ? BotChatter.Topic.KILL_REVENGE : BotChatter.Topic.KILL, 0.5, killer.getName(), dead.getName());
             }
         }
+        if (killer != null && !killer.equals(dead)) recentKills.put(dead.getUniqueId(), killer.getUniqueId());
         Bot b = bots.get(dead.getUniqueId());
         if (b == null) return;
         if (skill.debug) {
@@ -398,7 +401,7 @@ public final class BotManager implements Listener {
                 + (killer != null ? " от " + killer.getName() : "") + " | " + b.debug());
         }
         b.onDeath();
-        maybeChat(dead, DEATH_CHAT, 0.2);
+        chat(dead, deathTopic(dead, killer), 0.5, killer == null ? null : killer.getName(), dead.getName());
         // У бота нет кнопки «Возродиться» - жмём её сами через тик.
         Bukkit.getScheduler().runTaskLater(plugin, () -> {
             Player p = Bukkit.getPlayer(b.id);
@@ -504,16 +507,139 @@ public final class BotManager implements Listener {
     }
 
     /** Реплика бота в чат с вероятностью chance (если чат ботам разрешён). */
-    void say(Player p, String[] lines, double chance) {
-        maybeChat(p, lines, chance);
+    // ===================================================================== чат
+
+    private int lastGlobalChat = -1000;
+    private int nextSmallTalk = 20 * 120;
+    private boolean lastAliveSaid;
+    private final Map<UUID, UUID> recentKills = new HashMap<UUID, UUID>(); // жертва -> убийца
+
+    private String pick(BotChatter.Topic t) {
+        String[] lines = BotChatter.LINES.get(t);
+        return lines == null || lines.length == 0 ? null : lines[rnd.nextInt(lines.length)];
     }
 
-    private void maybeChat(final Player p, String[] lines, double chance) {
+    private static String fill(String raw, String killer, String victim, String other) {
+        if (raw == null) return null;
+        if (killer != null) raw = raw.replace("{k}", killer);
+        if (victim != null) raw = raw.replace("{v}", victim);
+        if (other != null) raw = raw.replace("{n}", other);
+        return raw.replace("{k}", "ты").replace("{v}", "ты").replace("{n}", "друг");
+    }
+
+    /** Реплика для своих («держи», «понял»): видят только люди из команды бота. */
+    void say(Player p, String[] lines, double chance) {
         if (!skill.chat || rnd.nextDouble() > chance) return;
-        final String msg = lines[rnd.nextInt(lines.length)];
+        teamMessage(p, lines[rnd.nextInt(lines.length)]);
+    }
+
+    void teamSay(Player p, BotChatter.Topic t, double chance) {
+        if (!skill.chat || rnd.nextDouble() > chance) return;
+        String msg = pick(t);
+        if (msg != null) teamMessage(p, msg);
+    }
+
+    private void teamMessage(final Player p, final String msg) {
+        final int team = hooks.teamIdOf(p.getUniqueId());
+        if (team < 0) return;
         Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            if (p.isOnline()) p.chat(msg);
-        }, 20L + rnd.nextInt(40));
+            if (!p.isOnline()) return;
+            for (Player o : Bukkit.getOnlinePlayers()) {
+                if (isBot(o) || hooks.teamIdOf(o.getUniqueId()) != team) continue;
+                o.sendMessage(org.bukkit.ChatColor.GREEN + "[Команда] " + org.bukkit.ChatColor.WHITE + "<" + p.getName() + "> " + msg);
+            }
+        }, 10L + rnd.nextInt(20));
+    }
+
+    /**
+     * Общая реплика на тему: видят все в мире игры. Иногда другой бот отвечает.
+     * Не чаще раза в 2.5 секунды на всех ботов, чтобы не было спама.
+     */
+    void chat(Player p, BotChatter.Topic t, double chance, String killer, String victim) {
+        if (!skill.chat || rnd.nextDouble() > chance || tick - lastGlobalChat < 50) return;
+        final String msg = fill(pick(t), killer, victim, null);
+        if (msg == null) return;
+        lastGlobalChat = tick;
+        final org.bukkit.World w = p.getWorld();
+        final String name = p.getName();
+        long delay = 15L + rnd.nextInt(30);
+        Bukkit.getScheduler().runTaskLater(plugin, () -> worldMessage(w, name, msg), delay);
+        BotChatter.Topic r = BotChatter.replyTo(t);
+        if (r != null && rnd.nextDouble() < 0.35) {
+            final Player other = randomOtherBot(w, p.getUniqueId());
+            if (other != null) {
+                final String answer = fill(pick(r), killer, victim, name);
+                Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    if (other.isOnline() && answer != null) worldMessage(w, other.getName(), answer);
+                }, delay + 30L + rnd.nextInt(50));
+            }
+        }
+    }
+
+    private void worldMessage(org.bukkit.World w, String name, String msg) {
+        for (Player o : w.getPlayers()) o.sendMessage("<" + name + "> " + msg);
+        plugin.getLogger().info("[чат бота] <" + name + "> " + msg);
+    }
+
+    private Player randomOtherBot(org.bukkit.World w, UUID not) {
+        List<Player> list = new ArrayList<Player>();
+        for (Bot b : bots.values()) {
+            if (b.id.equals(not)) continue;
+            Player o = b.player();
+            if (o != null && o.isOnline() && o.getWorld().equals(w)) list.add(o);
+        }
+        return list.isEmpty() ? null : list.get(rnd.nextInt(list.size()));
+    }
+
+    private BotChatter.Topic deathTopic(Player dead, Player killer) {
+        if (killer != null && !killer.equals(dead)) return BotChatter.Topic.DEATH_BY_PLAYER;
+        EntityDamageEvent last = dead.getLastDamageCause();
+        if (last == null) return BotChatter.Topic.DEATH_OTHER;
+        if (last instanceof EntityDamageByEntityEvent && ((EntityDamageByEntityEvent) last).getDamager() instanceof org.bukkit.entity.Warden)
+            return BotChatter.Topic.DEATH_WARDEN;
+        switch (last.getCause()) {
+            case WORLD_BORDER: return BotChatter.Topic.DEATH_ZONE;
+            case FALL: return BotChatter.Topic.DEATH_FALL;
+            case ENTITY_EXPLOSION: case BLOCK_EXPLOSION: return BotChatter.Topic.DEATH_EXPLOSION;
+            case LAVA: case FIRE: case FIRE_TICK: case HOT_FLOOR: return BotChatter.Topic.DEATH_FIRE;
+            case DROWNING: return BotChatter.Topic.DEATH_DROWN;
+            default: return BotChatter.Topic.DEATH_OTHER;
+        }
+    }
+
+    /** Бот победил - радуется в общий чат. */
+    public void onWin(UUID uid) {
+        Player p = Bukkit.getPlayer(uid);
+        if (p != null && isBot(p)) chat(p, BotChatter.Topic.WIN, 0.9, null, null);
+    }
+
+    /** Раз в секунду: болтовня ни о чём и «финал». */
+    private void chatterTick() {
+        if (!hooks.gameActive()) { lastAliveSaid = false; recentKills.clear(); nextSmallTalk = tick + 20 * 120; return; }
+        List<Player> alive = new ArrayList<Player>();
+        for (Bot b : bots.values()) {
+            Player o = b.player();
+            if (o != null && hooks.inGame(b.id) && o.getGameMode() == org.bukkit.GameMode.SURVIVAL) alive.add(o);
+        }
+        if (alive.isEmpty()) return;
+        if (!lastAliveSaid && hooks.alivePlayers().size() <= 3) {
+            lastAliveSaid = true;
+            chat(alive.get(rnd.nextInt(alive.size())), BotChatter.Topic.LAST_ALIVE, 0.6, null, null);
+        }
+        if (tick >= nextSmallTalk && alive.size() >= 2) {
+            nextSmallTalk = tick + 20 * (70 + rnd.nextInt(110));
+            if (!skill.chat || tick - lastGlobalChat < 100) return;
+            Player a = alive.get(rnd.nextInt(alive.size()));
+            Player b = randomOtherBot(a.getWorld(), a.getUniqueId());
+            if (b == null) return;
+            String[] pair = BotChatter.SMALLTALK[rnd.nextInt(BotChatter.SMALLTALK.length)];
+            final String q = pair[0], ans = pair[1 + rnd.nextInt(pair.length - 1)];
+            final org.bukkit.World w = a.getWorld();
+            final String an = a.getName(), bn = b.getName();
+            lastGlobalChat = tick;
+            Bukkit.getScheduler().runTaskLater(plugin, () -> worldMessage(w, an, q), 5L);
+            Bukkit.getScheduler().runTaskLater(plugin, () -> worldMessage(w, bn, ans), 50L + rnd.nextInt(50));
+        }
     }
 
     // ===================================================================== имена и скины
