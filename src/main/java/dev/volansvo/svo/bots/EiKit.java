@@ -157,7 +157,11 @@ final class EiKit {
     boolean combat(Player p, int now, LivingEntity e, double d, boolean visible, Vector vel) {
         if (restoreOffhandAt >= 0) return true;
         if (pending != null) {
-            if (now >= pendingUntil || pendingSlot < 0 || use(p.getInventory().getItem(pendingSlot)) != pending) { pending = null; return false; }
+            if (now >= pendingUntil || pendingSlot < 0 || use(p.getInventory().getItem(pendingSlot)) != pending) {
+                if (pending != null) cool(pending, now, 15); // не навелись - пока воюем обычным оружием
+                pending = null;
+                return false;
+            }
             return finish(p, now, e, d, vel);
         }
         if (!visible) return false;
@@ -205,6 +209,8 @@ final class EiKit {
         }
         float yaw = Motor.yawTo(t.getX() - eye.getX(), t.getZ() - eye.getZ());
         float pitch = Motor.pitchTo(t.getX() - eye.getX(), t.getY() - eye.getY(), t.getZ() - eye.getZ());
+        // Вблизи цель большая - промахнуться трудно, не ждём идеального прицела.
+        tol = Math.max(tol, (float) Math.toDegrees(Math.atan2(0.55, Math.max(0.5, d))) + 1f);
         if (needAim) {
             motor.turn(p, yaw, pitch, u == Use.SNIPER ? 12f : 25f);
             if (Math.abs(Motor.wrap(yaw - motor.yaw())) > tol || Math.abs(pitch - motor.pitch()) > tol) return true;

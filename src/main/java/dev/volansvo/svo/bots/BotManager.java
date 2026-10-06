@@ -74,6 +74,9 @@ public final class BotManager implements Listener {
     private int tick;
     private SquadRadio radio;
 
+    /** Одна ли команда (для рисования на карте). */
+    public boolean sameTeamPublic(UUID a, UUID b) { return hooks.sameTeam(a, b); }
+
     /** Приказ рации для команды (null - автономно). */
     SquadRadio.Order order(int teamId) { return radio == null ? null : radio.order(teamId); }
 

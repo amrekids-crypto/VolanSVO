@@ -143,26 +143,67 @@ public final class SquadRadio implements Listener {
 
     // =====================================================================  приказы
 
+    private final Map<UUID, Integer> lastClick = new HashMap<UUID, Integer>();
+
+    /** Один клик - одно действие (клиент шлёт сразу несколько событий на один клик). */
+    private boolean debounce(Player p) {
+        Integer last = lastClick.get(p.getUniqueId());
+        int now = bots.now();
+        if (last != null && now - last < 4) return false;
+        lastClick.put(p.getUniqueId(), now);
+        return true;
+    }
+
     @EventHandler(priority = EventPriority.LOWEST)
     public void onUse(PlayerInteractEvent e) {
         if (e.getHand() != EquipmentSlot.HAND || !isRadio(e.getItem())) return;
         e.setCancelled(true);
+        Action a = e.getAction();
+        boolean left = a == Action.LEFT_CLICK_AIR || a == Action.LEFT_CLICK_BLOCK;
+        if (debounce(e.getPlayer())) command(e.getPlayer(), left, null);
+    }
+
+    /** В технике взгляд упирается в её части: клик идёт по сущности, ловим и его. */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onUseEntity(org.bukkit.event.player.PlayerInteractEntityEvent e) {
+        if (e.getHand() != EquipmentSlot.HAND || !isRadio(e.getPlayer().getInventory().getItemInMainHand())) return;
+        e.setCancelled(true);
+        if (debounce(e.getPlayer())) command(e.getPlayer(), false, null);
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onHitWithRadio(org.bukkit.event.entity.EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Player)) return;
+        Player p = (Player) e.getDamager();
+        if (!isRadio(p.getInventory().getItemInMainHand())) return;
+        e.setCancelled(true);
+        LivingEntity hit = e.getEntity() instanceof Player && isEnemy(p, (Player) e.getEntity()) ? (LivingEntity) e.getEntity() : null;
+        if (debounce(p)) command(p, true, hit);
+    }
+
+    /** ЛКМ в воздух, сидя в технике (интеракт может не прийти). */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onSwing(org.bukkit.event.player.PlayerAnimationEvent e) {
         Player p = e.getPlayer();
+        if (!p.isInsideVehicle() || !isRadio(p.getInventory().getItemInMainHand())) return;
+        if (debounce(p)) command(p, true, null);
+    }
+
+    private void command(Player p, boolean left, LivingEntity forced) {
         int team = hooks.teamIdOf(p.getUniqueId());
         if (team < 0 || !hooks.gameActive()) return;
         Order o = orders.get(team);
         if (o == null) { o = new Order(); orders.put(team, o); }
         o.commander = p.getUniqueId();
-        Action a = e.getAction();
-        if (a == Action.LEFT_CLICK_AIR || a == Action.LEFT_CLICK_BLOCK) {
-            LivingEntity t = pickTarget(p);
+        if (left) {
+            LivingEntity t = forced != null ? forced : pickTarget(p);
             if (t == null) { p.sendActionBar(ChatColor.RED + "Не вижу врага в прицеле"); return; }
             if (o.mode != Mode.ATTACK) o.before = o.mode;
             o.mode = Mode.ATTACK;
             o.target = t.getUniqueId();
             o.until = bots.now() + 20 * 90;
             announce(p, o, ChatColor.RED + "Атаковать: " + ChatColor.WHITE + t.getName());
-        } else if (a == Action.RIGHT_CLICK_AIR || a == Action.RIGHT_CLICK_BLOCK) {
+        } else {
             Mode next;
             switch (o.mode) {
                 case AUTO: next = Mode.FOLLOW; break;

@@ -223,6 +223,25 @@ public final class Bot {
             learnSelfDamage += damage;
         }
         LivingEntity src = livingSource(attacker);
+        // Бьёт ПВО/турель (урон идёт от её владельца издалека или вообще без источника) -
+        // уходим из-под обстрела за укрытие и ставим стенку.
+        if (me != null) {
+            Location turret = turretShooting(me, now);
+            if (turret != null && (src == null || !(src instanceof Player)
+                    || src.getLocation().distanceSquared(me.getLocation()) > 40 * 40)) {
+                coverFrom = turret;
+                coverUntil = now + 100;
+                markDanger(turret, 100, now);
+                return;
+            }
+            if (src == null) {
+                // Не видно, откуда: не стоим столбом - уходим с этого места.
+                Location from = attacker != null ? attacker.getLocation()
+                    : me.getLocation().add(rnd.nextDouble() * 6 - 3, 0, rnd.nextDouble() * 6 - 3);
+                markDanger(from, 40, now);
+                return;
+            }
+        }
         if (src == null || src.getUniqueId().equals(id)) return;
         if (src instanceof Warden) {
             // С боссом не меряемся силами, если не охотимся на него специально.
@@ -239,6 +258,7 @@ public final class Bot {
         if (target == null || target.entity != src) {
             Player p = player();
             if (p != null && p.getLocation().distanceSquared(src.getLocation()) < 30 * 30) setTarget(c);
+            else if (p != null && !p.hasLineOfSight(src)) markDanger(src.getLocation(), 50, now); // невидимый снайпер - в укрытие
         }
     }
 
@@ -327,6 +347,7 @@ public final class Bot {
         if (pilot.active()) return; // только что запустили дрон - ходьба больше не управляет
         try {
             if (rides.tick(p, now, visibleEnemy(now))) return; // едем на технике или тросе
+            if (rides.shootFromSeat()) { fightFromSeat(p, now); return; }
         } catch (Throwable t) { mgr.warn("ride " + name, t); rides.reset(p); }
         // Подобранный дрон лёг в руку - убираем, иначе спринт/присед случайно его запустит.
         if (now >= busyUntil && isDroneItem(p.getInventory().getItemInMainHand())) stowDrone(p, now);
@@ -658,6 +679,27 @@ public final class Bot {
             return Goal.PICKUP;
         }
 
+        // 11б. Хорошо снаряжены - иногда идём на того, кто не выкинул карту (его видно на карте).
+        if (now >= nextMapHunt) {
+            nextMapHunt = now + 20 * 60;
+            if (power >= 1.6 && armorTotal(p) >= 8 && hp >= 14 && rnd.nextDouble() < 0.4) {
+                Player m = mapCarrier(p, 260);
+                if (m != null) { mapHuntId = m.getUniqueId(); mapHuntUntil = now + 20 * 90; }
+            }
+        }
+        if (mapHuntId != null) {
+            Player m = org.bukkit.Bukkit.getPlayer(mapHuntId);
+            if (m == null || now > mapHuntUntil || m.isDead() || m.getGameMode() != GameMode.SURVIVAL || !m.getWorld().equals(p.getWorld())
+                    || !m.getInventory().contains(Material.FILLED_MAP) || !hooks.inGame(m.getUniqueId())) {
+                mapHuntId = null;
+            } else {
+                Contact c = contact(m);
+                c.last = m.getLocation(); // видно на карте
+                if (target != c) setTarget(c);
+                return Goal.HUNT;
+            }
+        }
+
         // 12. Сундуки. Чем лучше снаряжён, тем ближе ищем.
         boolean geared = (hasGun(p) || findEi(p, Items.Custom.AUTO, now) >= 0) && armorTotal(p) >= 12 && countHeals(p) >= 2;
         double chestRadius = geared ? 28 : (armorTotal(p) < 4 ? 110 : 72); // без брони - ищем дальше
@@ -781,7 +823,17 @@ public final class Bot {
             }
             case DODGE: {
                 if (droneThreat == null) break;
-                Location safe = escapePoint(p, droneThreat, true);
+                if (dodgeFrom == null || !dodgeFrom.equals(droneThreat) || dodgePoint == null) {
+                    dodgeFrom = droneThreat;
+                    dodgePoint = escapePoint(p, droneThreat, true);
+                }
+                Location safe = dodgePoint;
+                // Бьёт ПВО, а мы ещё на виду - ставим стенку из блоков между нами.
+                if (coverFrom != null && now < coverUntil && now - lastHurt < 15 && now >= nextCoverWall
+                        && Builder.blockCount(p) >= 2 && turretSees(coverFrom, p)) {
+                    nextCoverWall = now + 40;
+                    if (builder.cover(p, coverFrom)) { motor.stop(p); return; }
+                }
                 nav.setGoal(safe, 1);
                 m = nav.tick(p, now);
                 if (!m.active) {
@@ -1159,6 +1211,7 @@ public final class Bot {
             boolean critWindow = !critJumped || falling;
             if (d <= 3.05 && p.getAttackCooldown() >= 0.92f && critWindow && aimedAt(p, e, 18f)) {
                 BotNms.attack(p, e);
+                tauntOnAttack(p, e);
                 critJumped = false;
                 wtapUntil = now + 2;
                 if (learnKey == null) maybeStartLearning(p, e, now, p.getInventory().getItemInMainHand());
@@ -1195,6 +1248,7 @@ public final class Bot {
         if (!ready) return;
         if (reactionLeft > 0) { reactionLeft--; return; }
         fireWeapon(p, w, e, aim, d, now);
+        tauntOnAttack(p, e);
     }
 
     /** Стрельба на ходу (уход из зоны, бегство). */
@@ -1438,7 +1492,7 @@ public final class Bot {
         if (target == c) return;
         target = c;
         Player me = player();
-        if (me != null && c.entity instanceof Player && c.visible) talk(me, BotChatter.Topic.SEE_ENEMY, 0.06, 20 * 60, c.entity.getName());
+
         // Время реакции: человек не стреляет в ту же миллисекунду, как увидел.
         reactionLeft = Math.max(1, (int) Math.round(skill.reactionTicks * (0.7 + rnd.nextDouble() * 0.7)));
         nav.clear();
@@ -1915,6 +1969,24 @@ public final class Bot {
         caveDirSince = now;
     }
 
+    /** Стрельба с пассажирского сиденья: только целимся и стреляем, без движения и приседа. */
+    private void fightFromSeat(Player p, int now) {
+        Contact t = target;
+        if (t == null || t.entity == null || t.entity.isDead() || !t.visible) return;
+        LivingEntity e = t.entity;
+        double d = e.getLocation().distance(p.getLocation());
+        Weapon w = chooseWeapon(p, d, now);
+        if (w == Weapon.MELEE || w == Weapon.THROW) return;
+        int slot = weaponSlot(p, w);
+        if (slot < 0 || !hold(p, slot, now)) return;
+        Location aim = aimPoint(p, e, t, w, d);
+        updateAimNoise(p, e, d, now);
+        motor.turn(p, yawTo(p, aim) + aimOffYaw, pitchTo(p, aim) + aimOffPitch, skill.turnSpeed);
+        if (reactionLeft > 0) { if (aimedAt(p, e, 12f)) reactionLeft--; return; }
+        fireWeapon(p, w, e, aim, d, now);
+        tauntOnAttack(p, e);
+    }
+
     /** У врага в руках нет ничего дальнобойного. */
     private boolean meleeOnly(LivingEntity e) {
         if (!(e instanceof Player)) return true;
@@ -2052,6 +2124,64 @@ public final class Bot {
             default:
                 return null;
         }
+    }
+
+    private Location coverFrom, dodgeFrom, dodgePoint;
+    private int coverUntil, nextCoverWall, nextTurretScan, nextMapHunt = 20 * 90, mapHuntUntil;
+    private UUID mapHuntId, tauntedId;
+    private final List<Location> turrets = new ArrayList<Location>();
+
+    /** Враг с картой в инвентаре (его стрелка видна на карте). */
+    private Player mapCarrier(Player p, double r) {
+        Player best = null;
+        double bd = r * r;
+        for (Player o : hooks.alivePlayers()) {
+            if (o.getUniqueId().equals(id) || hooks.sameTeam(id, o.getUniqueId()) || !o.getWorld().equals(p.getWorld())) continue;
+            if (o.getGameMode() != GameMode.SURVIVAL || !o.getInventory().contains(Material.FILLED_MAP)) continue;
+            double d = o.getLocation().distanceSquared(p.getLocation());
+            if (d < bd) { bd = d; best = o; }
+        }
+        return best;
+    }
+
+    /** Подразнить того, кого только что атаковали (раз на цель). */
+    private void tauntOnAttack(Player p, LivingEntity e) {
+        if (!(e instanceof Player) || e.getUniqueId().equals(tauntedId)) return;
+        tauntedId = e.getUniqueId();
+        talk(p, BotChatter.Topic.SEE_ENEMY, 0.12, 20 * 45, e.getName());
+    }
+
+    /** ПВО MilitaryCraft рядом, которая видит бота (её мы и слышим). */
+    private Location turretShooting(Player p, int now) {
+        if (now >= nextTurretScan) {
+            nextTurretScan = now + 40;
+            turrets.clear();
+            java.util.Set<String> ids = new java.util.HashSet<String>();
+            for (Entity e : p.getNearbyEntities(70, 40, 70)) {
+                for (org.bukkit.NamespacedKey k : e.getPersistentDataContainer().getKeys()) {
+                    if (!k.getKey().equals("turret_id") || !k.getNamespace().equals("antiaircraft")) continue;
+                    String tid = String.valueOf(e.getPersistentDataContainer().get(k, org.bukkit.persistence.PersistentDataType.STRING));
+                    if (ids.add(tid)) turrets.add(e.getLocation());
+                }
+            }
+        }
+        Location best = null;
+        double bd = Double.MAX_VALUE;
+        for (Location t : turrets) {
+            if (!t.getWorld().equals(p.getWorld())) continue;
+            double d = t.distanceSquared(p.getLocation());
+            if (d < bd && turretSees(t, p)) { bd = d; best = t; }
+        }
+        return best;
+    }
+
+    private static boolean turretSees(Location t, Player p) {
+        Location from = t.clone().add(0, 1.5, 0);
+        Vector dir = p.getEyeLocation().toVector().subtract(from.toVector());
+        double len = dir.length();
+        if (len < 0.5) return true;
+        return t.getWorld().rayTraceBlocks(from, dir.multiply(1 / len), len - 0.5,
+            org.bukkit.FluidCollisionMode.NEVER, true) == null;
     }
 
     /** Отбежать от этой точки (динамит, удар) на ticks тиков. */
@@ -3212,7 +3342,8 @@ public final class Bot {
         List<ItemStack> out = new ArrayList<ItemStack>();
         // Еда: у тиммейта голод и нет еды, у нас есть лишняя.
         int myFood = countKind(me, Items.Kind.FOOD);
-        if (mate.getFoodLevel() <= 12 && countKind(mate, Items.Kind.FOOD) == 0 && myFood >= 2) {
+        // У тиммейта нет еды совсем - делимся всегда, даже последним.
+        if (countKind(mate, Items.Kind.FOOD) == 0 && myFood >= 1) {
             ItemStack f = stackOf(me, Items.Kind.FOOD, Math.max(1, Math.min(8, myFood / 2)));
             if (f != null) out.add(f);
         }
