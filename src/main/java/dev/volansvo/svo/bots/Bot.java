@@ -392,7 +392,7 @@ public final class Bot {
                 case HEAL: talk(p, BotChatter.Topic.T_HEAL, 0.08, 20 * 60, null); break;
                 case DODGE: talk(p, BotChatter.Topic.T_DODGE, 0.25, 20 * 30, null); break;
                 case CHASE:
-                    if (target != null && target.entity instanceof Player) talk(p, BotChatter.Topic.CHASE, 0.25, 20 * 60, target.entity.getName());
+                    if (target != null && target.entity instanceof Player) talk(p, BotChatter.Topic.CHASE, 0.05, 20 * 90, target.entity.getName());
                     break;
                 default:
             }
@@ -1411,7 +1411,7 @@ public final class Bot {
             bodyHitTick = now;
             if (skill.debug) mgr.debug(name + " ломает тело пилота " + pilotOf(b));
             String owner = pilotOf(b);
-            if (owner != null) talk(p, BotChatter.Topic.TOXIC, 0.6, 20 * 30, owner);
+            if (owner != null) talk(p, BotChatter.Topic.TOXIC, 0.12, 20 * 45, owner);
         } else if (now - bodyHitTick == 2) {
             BotNms.attack(p, b);
         }
@@ -1825,9 +1825,6 @@ public final class Bot {
         Location loc = p.getLocation();
         double d = e.getLocation().distance(loc);
         boolean visible = t.visible;
-
-        // Школьный токсик в общий чат, пока деремся с игроком (или ботом).
-        if (visible && e instanceof Player && d < 45) talk(p, BotChatter.Topic.TOXIC, 0.4, 20 * 20, e.getName());
 
         if (kamikazeReady(p, now) && kamikazeStep(p, now, e, d)) return;
 
@@ -2909,7 +2906,8 @@ public final class Bot {
     private void tauntOnAttack(Player p, LivingEntity e) {
         if (!(e instanceof Player) || e.getUniqueId().equals(tauntedId)) return;
         tauntedId = e.getUniqueId();
-        talk(p, BotChatter.Topic.SEE_ENEMY, 0.35, 20 * 30, e.getName());
+        // Как раньше по частоте, но через раз школьный токсик.
+        talk(p, rnd.nextBoolean() ? BotChatter.Topic.TOXIC : BotChatter.Topic.SEE_ENEMY, 0.12, 20 * 45, e.getName());
     }
 
     /** ПВО MilitaryCraft рядом, которая видит бота (её мы и слышим). */
