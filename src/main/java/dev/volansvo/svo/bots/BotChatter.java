@@ -18,8 +18,10 @@ final class BotChatter {
         SEE_ENEMY, CHASE, WIN, LAST_ALIVE,
         // ---- ответы других ботов
         REPLY_DEATH, REPLY_KILL, REPLY_NUKE, REPLY_GENERIC,
+        // ---- ответы игрокам
+        R_BOT_DENY, R_BOT_ADMIT, R_GG, KILL_AGAIN,
         // ---- командный чат
-        T_LOW_HP, T_SHARE, T_ACK, T_HELP, T_DODGE, T_EVADE, T_RELOAD, T_CAVE, T_WARDEN, T_VEHICLE, T_HEAL, T_LOOT_TO_YOU
+        T_LOW_HP, T_SHARE, T_ACK, T_HELP, T_DODGE, T_EVADE, T_RELOAD, T_CAVE, T_WARDEN, T_VEHICLE, T_HEAL, T_LOOT_TO_YOU, T_NO_ITEMS
     }
 
     static final Map<Topic, String[]> LINES = new EnumMap<Topic, String[]>(Topic.class);
@@ -236,6 +238,20 @@ final class BotChatter {
         LINES.put(Topic.REPLY_GENERIC, new String[]{
             "Ага", "Ну да", "Согласен", "Ничего не понял, но поддерживаю", "Точно", "Ахаха", "Мда",
         });
+        // ---- ответы игрокам
+        LINES.put(Topic.R_BOT_DENY, new String[]{
+            "Сам ты бот", "Я человек вообще-то", "Бот у тебя в зеркале", "Какой бот, я с телефона играю",
+            "Мама говорит, я настоящий", "Обидно, между прочим", "Докажи, что ты сам не бот",
+        });
+        LINES.put(Topic.R_BOT_ADMIT, new String[]{
+            "Да, и что", "Бот, зато честный", "Бот. Но стреляю как человек", "А ты кожаный, и что теперь",
+            "Ну бот. Зато не опаздываю в катку",
+        });
+        LINES.put(Topic.R_GG, new String[]{"гг", "gg", "гг вп", "гг, ещё катку?", "хорошая игра"});
+        LINES.put(Topic.KILL_AGAIN, new String[]{
+            "{v}, опять ты? Опять я", "{v}, мы уже встречались. Тогда было так же", "{v}, это становится традицией",
+            "Снова {v}. Я тебя уже по шагам узнаю",
+        });
         // ---- командный чат
         LINES.put(Topic.T_LOW_HP, new String[]{
             "Аптечку мне, аптечку! Хотя бы подорожник",
@@ -254,6 +270,7 @@ final class BotChatter {
         LINES.put(Topic.T_WARDEN, new String[]{"Тихо, там Жириновский!", "Обходим Жириновского стороной", "Не шумите, Жириновский рядом"});
         LINES.put(Topic.T_VEHICLE, new String[]{"Поехали!", "Садись, подвезу!", "Пристегнитесь", "Газу!"});
         LINES.put(Topic.T_HEAL, new String[]{"Лечусь, прикройте", "Секунду, ем яблоко", "Подлатаюсь и вернусь"});
+        LINES.put(Topic.T_NO_ITEMS, new String[]{"сам пустой", "нету", "у самого ноль", "нет, самому бы найти", "не, пусто"});
         LINES.put(Topic.T_LOOT_TO_YOU, new String[]{"Нёс тебе подарки", "Смотри, что нашёл!", "Это тебе, командир", "Залутал, раздаю"});
     }
 

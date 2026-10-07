@@ -219,6 +219,23 @@ public final class SquadRadio implements Listener {
         }
     }
 
+    /** Приказ словами из чата («за мной», «стой»). false - у игрока в команде нет ботов. */
+    boolean order(Player p, Mode mode) {
+        int team = hooks.teamIdOf(p.getUniqueId());
+        if (team < 0 || !hooks.gameActive() || !teamHasBots(p.getUniqueId())) return false;
+        Order o = orders.get(team);
+        if (o == null) { o = new Order(); orders.put(team, o); }
+        o.commander = p.getUniqueId();
+        o.mode = mode;
+        o.target = null;
+        if (mode == Mode.HOLD) o.hold = p.getLocation().clone();
+        announce(p, o, ChatColor.YELLOW + mode.title + ChatColor.GRAY + " - " + mode.hint);
+        for (int i = 0; i < p.getInventory().getSize(); i++) {
+            if (isRadio(p.getInventory().getItem(i))) p.getInventory().setItem(i, createRadio(mode));
+        }
+        return true;
+    }
+
     private void announce(Player p, Order o, String text) {
         o.version++;
         p.sendActionBar(ChatColor.GOLD + "Приказ ботам: " + text);

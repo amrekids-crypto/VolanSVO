@@ -1,5 +1,6 @@
 package dev.volansvo.svo.bots;
 
+import dev.volansvo.svo.bots.human.AimModel;
 import dev.volansvo.svo.bots.nms.BotNms;
 import org.bukkit.entity.Player;
 
@@ -13,6 +14,34 @@ public final class Motor {
 
     private float yaw, pitch;
     private boolean init;
+    private AimModel aim;
+
+    /** Включить модель руки для ведения цели в бою. */
+    public void setAim(AimModel aim) { this.aim = aim; }
+
+    /** Новая цель или она появилась снова: точность набирается заново. */
+    public void acquire() { if (aim != null) aim.acquire(); }
+
+    /** Во сколько раз разброс сейчас больше обычного: первые выстрелы по новой цели хуже. */
+    public double warm() { return aim == null ? 1.0 : 1.0 + 1.2 * Math.exp(-aim.onTarget() / 14.0); }
+
+    /** Вести цель: поправки порциями, как рука с мышью. Без модели - обычный поворот. */
+    public void track(Player p, float targetYaw, float targetPitch, float maxTurn) {
+        if (aim == null) { turn(p, targetYaw, targetPitch, maxTurn); return; }
+        if (!init) sync(p);
+        aim.yaw = yaw; aim.pitch = pitch; aim.maxSpeed = maxTurn;
+        aim.step(targetYaw, targetPitch);
+        yaw = aim.yaw; pitch = aim.pitch;
+        BotNms.look(p, yaw, pitch);
+    }
+
+    /** Дёрнуть прицел (вздрогнул от попадания). */
+    public void nudge(Player p, float dYaw, float dPitch) {
+        if (!init) sync(p);
+        yaw = wrap(yaw + dYaw);
+        pitch = Math.max(-90f, Math.min(90f, pitch + dPitch));
+        BotNms.look(p, yaw, pitch);
+    }
 
     public float yaw() { return yaw; }
     public float pitch() { return pitch; }
