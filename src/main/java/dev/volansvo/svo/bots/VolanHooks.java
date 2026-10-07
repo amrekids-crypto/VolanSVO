@@ -114,6 +114,22 @@ public final class VolanHooks {
         return plugin.getWardenManager().getWarden();
     }
 
+    /** Сколько жизней осталось у участника (1 - последняя). */
+    public int livesLeft(UUID uid) {
+        SvoPlayer sp = plugin.getGameManager().getSvoPlayer(uid);
+        return sp == null ? 1 : sp.getLives();
+    }
+
+    /** Имя текущей карты: по нему хранятся тропы игроков. */
+    public String mapKey() {
+        try {
+            String id = plugin.getMapManager().getActiveMapId();
+            return id == null ? "default" : id.replaceAll("[^A-Za-z0-9_-]", "_");
+        } catch (Throwable t) {
+            return "default";
+        }
+    }
+
     public Player player(UUID uid) {
         return Bukkit.getPlayer(uid);
     }

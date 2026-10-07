@@ -34,6 +34,9 @@ final class DronePilot {
     private Location prevTarget;
     private int nextDrop;
     private int drops;
+    /** Насколько точно пилот берёт упреждение в этом вылете и в какую сторону его водит. */
+    private double leadK = 1.0;
+    private double wobble;
 
     DronePilot(VolanHooks hooks, UUID self) {
         this.hooks = hooks;
@@ -48,6 +51,9 @@ final class DronePilot {
         prevTarget = null;
         since = now;
         drops = 0;
+        java.util.concurrent.ThreadLocalRandom r = java.util.concurrent.ThreadLocalRandom.current();
+        leadK = 0.3 + r.nextDouble() * 0.9;
+        wobble = r.nextDouble() * 6.28;
         if (fpv) {
             BotNms.input(p, 0f, 0f, false);
             BotNms.sneak(p, false);
@@ -103,9 +109,11 @@ final class DronePilot {
         Location pos = p.getLocation();
         if (!validTarget(target, pos)) target = nearestEnemy(pos, 160);
         if (target == null || now - since > 20 * 38) { BotNms.sprint(p, false); return; }
-        Location dest = target.getLocation().add(lead(target).multiply(6)).add(0, 1.0, 0);
+        Location dest = target.getLocation().add(lead(target).multiply(6 * leadK)).add(0, 1.0, 0);
         Vector to = dest.toVector().subtract(pos.toVector());
         double d = to.length();
+        // Издалека дрон идёт не по струне: пилота водит из стороны в сторону.
+        if (d > 8) to.rotateAroundY(Math.sin((now - since) / 9.0 + wobble) * 0.22);
         if (d <= 1.7) {
             // Не взрываемся рядом со своими.
             if (!teammateNear(dest, 5)) { BotNms.sprint(p, false); return; }
@@ -122,7 +130,7 @@ final class DronePilot {
         Location pos = p.getLocation();
         if (!validTarget(target, pos)) target = nearestEnemy(pos, 140);
         if (target == null || drops >= 3 || now - since > 20 * 13) { BotNms.sneak(p, false); return; }
-        Location t = target.getLocation().add(lead(target).multiply(4));
+        Location t = target.getLocation().add(lead(target).multiply(4 * leadK));
         World w = pos.getWorld();
         double ground = w.isChunkLoaded(t.getBlockX() >> 4, t.getBlockZ() >> 4) ? w.getHighestBlockYAt(t) : t.getY();
         // Над холмом по пути тоже держим высоту: влетевший в блок дрон разбивается.
