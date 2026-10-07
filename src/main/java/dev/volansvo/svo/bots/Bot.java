@@ -971,6 +971,8 @@ public final class Bot {
                     nav.clear();
                     break;
                 }
+                if (!target.visible && seekLineOfSight(p, now, target.entity)) return;
+                if (target == null) break;
                 nav.setGoal(target.last, 2);
                 m = nav.tick(p, now);
                 // Доходим до последнего места, где видели, - дальше ищем вокруг.
@@ -1496,6 +1498,70 @@ public final class Bot {
         return true;
     }
 
+
+
+    // =====================================================================  враг рядом, но не виден
+
+    private Location losSpot;
+    private int losSpotUntil, losFailUntil;
+
+    /** Видно ли цель из точки глаз eye (блоки между не мешают). */
+    private static boolean seesFrom(Location eye, LivingEntity e) {
+        Location to = e.getEyeLocation();
+        org.bukkit.util.Vector dir = to.toVector().subtract(eye.toVector());
+        double len = dir.length();
+        if (len < 0.1) return true;
+        return eye.getWorld().rayTraceBlocks(eye, dir.multiply(1.0 / len), len, org.bukkit.FluidCollisionMode.NEVER, true) == null;
+    }
+
+    /**
+     * Враг в паре шагов, но его не видно (угол, уступ, блок между нами) - игрок шагнул бы
+     * туда, откуда видно, или сломал бы мешающий блок. Так и делаем. true - тик занят.
+     */
+    private boolean seekLineOfSight(Player p, int now, LivingEntity e) {
+        if (now < losFailUntil || e == null || e.isDead()) return false;
+        Location l = p.getLocation();
+        if (e.getLocation().distance(l) > 5) return false;
+        World w = p.getWorld();
+        if (losSpot == null || now > losSpotUntil) {
+            losSpot = null;
+            losSpotUntil = now + 20;
+            int fy = (int) Math.floor(l.getY() + 0.01);
+            double bd = Double.MAX_VALUE;
+            for (int dx = -2; dx <= 2; dx++) for (int dz = -2; dz <= 2; dz++) for (int dy = -1; dy <= 1; dy++) {
+                int x = l.getBlockX() + dx, y = fy + dy, z = l.getBlockZ() + dz;
+                if (!walkable(w, x, y, z)) continue;
+                Location eye = new Location(w, x + 0.5, y + 1.62, z + 0.5);
+                if (!seesFrom(eye, e)) continue;
+                double d = dx * dx + dz * dz + dy * dy * 2;
+                if (d < bd) { bd = d; losSpot = new Location(w, x + 0.5, y, z + 0.5); }
+            }
+        }
+        if (losSpot != null) {
+            double dx = losSpot.getX() - l.getX(), dz = losSpot.getZ() - l.getZ();
+            Location eye = e.getEyeLocation();
+            motor.turn(p, yawTo(p, eye), pitchTo(p, eye), skill.turnSpeed);
+            motor.drive(p, dx, dz, 1.0, 0f, losSpot.getY() > l.getY() + 0.5 && BotNms.onGround(p), false);
+            return true;
+        }
+        // Шагнуть некуда - ломаем то, что между нами.
+        Location eye = p.getEyeLocation();
+        org.bukkit.util.Vector dir = e.getEyeLocation().toVector().subtract(eye.toVector());
+        double len = dir.length();
+        org.bukkit.util.RayTraceResult hit = len < 0.1 ? null
+            : w.rayTraceBlocks(eye, dir.multiply(1.0 / len), len, org.bukkit.FluidCollisionMode.NEVER, true);
+        Block b = hit == null ? null : hit.getHitBlock();
+        if (b != null && Builder.canDig(p, b) && !builder.isDenied(b)) {
+            motor.stop(p);
+            if (builder.mine(p, b, now)) return true;
+        }
+        // Ни увидеть, ни пробиться - пусть идёт своей дорогой, займёмся другим.
+        losFailUntil = now + 20 * 15;
+        ignoreUntil.put(e.getUniqueId(), now + 20 * 15);
+        if (target != null && target.entity == e) target = null;
+        if (skill.debug) mgr.debug(name + " не видит " + e.getName() + " рядом и не пробиться, бросаю");
+        return false;
+    }
 
     // =====================================================================  стоим на месте
 
@@ -2153,7 +2219,7 @@ public final class Bot {
     private Location escapeTo, escapeGoal;
     private Drop escapeDrop;
     private boolean escapeBelow, escapePlatform;
-    private int belowBanUntil, platformChecks, platformCheckAt;
+    private int belowBanUntil, platformChecks, platformCheckAt, platformBanUntil;
 
     private void recordCrumb(Player p, int now) {
         if (now < nextCrumb || !BotNms.onGround(p) || p.isInsideVehicle()) return;
@@ -2178,7 +2244,7 @@ public final class Bot {
         // Летающая постройка: под полом пустота. Побыли на ней ~12 секунд, а цель не тут - слезаем.
         if (now >= platformCheckAt) {
             platformCheckAt = now + 40;
-            platformChecks = BotNms.onGround(p) && onFloatingFloor(p) ? platformChecks + 1 : 0;
+            platformChecks = now >= platformBanUntil && BotNms.onGround(p) && onFloatingFloor(p) ? platformChecks + 1 : 0;
         }
         boolean platform = platformChecks >= 6;
         // Спуск (лестница в доме тоже крутится на пятачке) ловушкой не считаем.
@@ -2325,7 +2391,9 @@ public final class Bot {
             if (escapeDrop == null) escapeDrop = bestDropEdge(p, toward, hp - 1, maxR);
             if (escapeDrop == null && toward != null) escapeDrop = bestDropEdge(p, null, hp - 1, maxR);
             if (escapeDrop == null) {
+                boolean wasPlatform = escapePlatform;
                 finishEscape();
+                if (wasPlatform) platformBanUntil = now + 20 * 60; // спрыгнуть нельзя - минуту не пробуем
                 startLocalPath(p, now, "прыгать некуда");
                 return false;
             }
@@ -2608,6 +2676,8 @@ public final class Bot {
         boolean sneak = false;
 
         if (!visible) {
+            if (seekLineOfSight(p, now, e)) return;
+            if (target == null) return;
             // Враг за укрытием: идём туда, где видели, держа прицел на углу.
             nav.setGoal(t.last, 2);
             Navigator.Move m = nav.tick(p, now);
