@@ -33,6 +33,10 @@ final class Builder {
     private Block mining;
     private float progress;
     private int mineStart;
+    /** Блоки, которые сломать не дали (защита региона и т.п.): ключ позиции -> до какого времени не трогаем. */
+    private final java.util.Map<Long, Long> denied = new java.util.HashMap<Long, Long>();
+    /** Отладка: почему бросили недоломанный блок (null - не пишем). */
+    java.util.function.Consumer<String> debugLog;
     private int towerFeetY = Integer.MIN_VALUE;
 
     Builder(Motor motor, IntPredicate hold, float turnSpeed) {
@@ -77,11 +81,11 @@ final class Builder {
      * слишком далеко (тогда вызывающий сначала подходит).
      */
     boolean mine(Player p, Block b, int now) {
-        if (b == null || !canDig(p, b)) { stopMining(p); return false; }
+        if (b == null || !canDig(p, b) || isDenied(b)) { stopMining(p, "нельзя"); return false; }
         Location c = b.getLocation().add(0.5, 0.5, 0.5);
-        if (p.getEyeLocation().distance(c) > 4.4) { stopMining(p); return false; }
+        if (p.getEyeLocation().distance(c) > 4.4) { stopMining(p, "далеко"); return false; }
         if (mining == null || !mining.equals(b)) {
-            stopMining(p);
+            stopMining(p, "другой блок " + b.getType());
             mining = b;
             progress = 0f;
             mineStart = now;
@@ -93,14 +97,20 @@ final class Builder {
         motor.turn(p, Motor.yawTo(c.getX() - eye.getX(), c.getZ() - eye.getZ()),
             Motor.pitchTo(c.getX() - eye.getX(), c.getY() - eye.getY(), c.getZ() - eye.getZ()), turnSpeed);
         float speed = b.getBreakSpeed(p);
-        if (speed <= 0f || now - mineStart > 20 * 12) { stopMining(p); return false; }
+        if (speed <= 0f || now - mineStart > 20 * 12) { stopMining(p, speed <= 0f ? "скорость 0" : "12 секунд"); return false; }
         progress += speed;
         if (now % 5 == 0) p.swingMainHand();
         if (now % 3 == 0) crack(p, b, Math.min(progress, 0.99f));
         if (progress >= 1f) {
-            crack(p, b, 0f);
+            crack(p, b, -1f);
             mining = null;
-            p.breakBlock(b); // BlockBreakEvent, дроп, износ инструмента - как у игрока
+            progress = 0f;
+            // BlockBreakEvent, дроп, износ инструмента - как у игрока. Не дали сломать - минуту не трогаем.
+            if (!p.breakBlock(b)) {
+                denied.put(key(b), System.currentTimeMillis() + 60_000L);
+                warnDenied(b);
+                if (debugLog != null) debugLog.accept("не дали сломать " + b.getType() + " " + b.getX() + "," + b.getY() + "," + b.getZ());
+            }
             return false;
         }
         return true;
@@ -109,21 +119,57 @@ final class Builder {
     /** Доломать начатый блок, если он ещё стоит и до него достаём. true - ломаем. */
     boolean resumeMining(Player p, int now) {
         if (mining == null) return false;
-        if (!mining.getType().isSolid()) { stopMining(p); return false; }
+        // Рыхлый снег и паутина не «твёрдые», но ломать их надо так же до конца.
+        if (mining.getType().isAir() || mining.isLiquid()) { stopMining(p); return false; }
         return mine(p, mining, now);
     }
 
     void stopMining(Player p) {
-        if (mining != null && p != null) crack(p, mining, 0f);
+        stopMining(p, null);
+    }
+
+    private void stopMining(Player p, String why) {
+        if (mining != null && p != null) {
+            crack(p, mining, -1f); // трещину убираем сразу, иначе висит на брошенном блоке
+            if (why != null && debugLog != null && progress > 0.1f && !mining.getType().isAir())
+                debugLog.accept("бросил " + mining.getType() + " на " + Math.round(progress * 100) + "%: " + why);
+        }
         mining = null;
         progress = 0f;
     }
 
-    private static void crack(Player p, Block b, float stage) {
-        Location l = b.getLocation();
-        for (Player v : b.getWorld().getPlayers()) {
-            if (v.getLocation().distanceSquared(l) < 40 * 40) v.sendBlockDamage(l, stage, p.getEntityId());
-        }
+    private static boolean warnedDenied;
+
+    /** Один раз в консоль: ломать блоки ботам не даёт другой плагин (кто слушает BlockBreakEvent). */
+    private static void warnDenied(Block b) {
+        if (warnedDenied) return;
+        warnedDenied = true;
+        java.util.Set<String> who = new java.util.TreeSet<String>();
+        for (org.bukkit.plugin.RegisteredListener rl : org.bukkit.event.block.BlockBreakEvent.getHandlerList().getRegisteredListeners())
+            who.add(rl.getPlugin().getName());
+        org.bukkit.Bukkit.getLogger().warning("[VolanSVO] Бот не смог сломать " + b.getType() + " в " + b.getWorld().getName() + " "
+            + b.getX() + "," + b.getY() + "," + b.getZ() + ": BlockBreakEvent отменил другой плагин. Его слушают: " + who);
+    }
+
+    private static long key(Block b) {
+        return ((long) b.getX() & 0x3FFFFFFL) << 38 | ((long) b.getZ() & 0x3FFFFFFL) << 12 | ((long) b.getY() & 0xFFFL);
+    }
+
+    /** Этот блок недавно не дали сломать. */
+    boolean isDenied(Block b) {
+        if (denied.isEmpty()) return false;
+        Long until = denied.get(key(b));
+        if (until == null) return false;
+        if (System.currentTimeMillis() < until) return true;
+        denied.remove(key(b));
+        return false;
+    }
+
+    /** Трещины на блоке у всех рядом, как от игрока; progress < 0 - убрать. */
+    private static void crack(Player p, Block b, float progress) {
+        int stage = progress < 0 ? -1 : Math.min(9, (int) (progress * 10f));
+        ((org.bukkit.craftbukkit.CraftWorld) b.getWorld()).getHandle().destroyBlockProgress(p.getEntityId(),
+            new net.minecraft.core.BlockPos(b.getX(), b.getY(), b.getZ()), stage);
     }
 
     /** Подходящий инструмент (кирка для камня, топор для дерева...) получше. */

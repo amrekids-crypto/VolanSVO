@@ -193,6 +193,7 @@ public final class Bot {
             Player bp = player();
             return bp != null && hold(bp, slot, mgr.now());
         }, skill.turnSpeed);
+        if (skill.debug) this.builder.debugLog = msg -> mgr.debug(name + " " + msg);
         this.eikit = new EiKit(mgr, id, name, motor, slot -> {
             Player bp = player();
             return bp != null && hold(bp, slot, mgr.now());
@@ -752,6 +753,7 @@ public final class Bot {
         boolean directMove = false;
         double dmx = 0, dmz = 0;
 
+        fallGuard(p, now);
         if (now < stillUntil) {
             motor.stop(p);
             BotNms.sneak(p, true);
@@ -767,8 +769,9 @@ public final class Bot {
 
         // Начатый блок доламываем до конца: иначе путь или цель меняются, трещина
         // сбрасывается, и бот раз за разом начинает тот же песок заново.
-        if (builder.isMining() && goal != Goal.FIGHT && goal != Goal.DODGE && goal != Goal.EVADE
-                && goal != Goal.DROP && goal != Goal.HEAL && goal != Goal.NUKE && goal != Goal.PICK_NUKE) {
+        boolean snowed = inPowderSnow(p) || now < snowUntil; // в снегу доламываем при любой цели, иначе замёрзнем
+        if (builder.isMining() && (snowed && goal != Goal.DROP || goal != Goal.FIGHT && goal != Goal.DODGE && goal != Goal.EVADE
+                && goal != Goal.DROP && goal != Goal.HEAL && goal != Goal.NUKE && goal != Goal.PICK_NUKE)) {
             motor.stop(p);
             if (builder.resumeMining(p, now)) return;
         }
@@ -966,7 +969,7 @@ public final class Bot {
                 }
                 if (chest == null) break;
                 lootChest(p, now);
-                if (goal == Goal.LOOT || goal == Goal.AIRDROP) {
+                if (chest != null && (goal == Goal.LOOT || goal == Goal.AIRDROP)) { // lootChest мог закрыть сундук
                     Location c = new Location(p.getWorld(), chest[0] + 0.5, chest[1] + 0.5, chest[2] + 0.5);
                     if (chestOpenAt >= 0) { motor.turn(p, yawTo(p, c), pitchTo(p, c), skill.turnSpeed); motor.stop(p); return; }
                     nav.setGoal(c, 1);
@@ -1113,6 +1116,7 @@ public final class Bot {
             Block done = minedBlock;
             minedBlock = null;
             if (done.getType().isAir()) digCount++;
+            else if (builder.isDenied(done)) digCount += 2; // ломать не дают
             int feetY = p.getLocation().getBlockY();
             Block pair = done.getY() > feetY ? done.getRelative(org.bukkit.block.BlockFace.DOWN)
                 : done.getRelative(org.bukkit.block.BlockFace.UP);
@@ -1316,13 +1320,15 @@ public final class Bot {
             return false;
         }
         int need = colHeight(w, x + pitDx, fy, z + pitDz);
-        if (need <= 1) {
-            // До стенки ещё идти, или осталась ступенька в блок - шагаем (с прыжком).
+        if (skill.debug && now % 40 == 0) mgr.debug(name + " яма: стенка " + need + " к " + pitDx + "," + pitDz + " блоков " + Builder.blockCount(p)
+            + " столб " + pitTowerOk + "/" + builder.towerWhy + " проход " + caveWhy + " y=" + String.format("%.2f", l.getY()));
+        if (need == 0) {
+            // До стенки ещё идти (или уже на краю) - шагаем.
             motor.turn(p, Motor.yawTo(pitDx, pitDz), 0f, Math.min(skill.turnSpeed, 20f));
-            motor.drive(p, pitDx, pitDz, 1.0, 0f, need == 1 && BotNms.onGround(p) || BotNms.horizontalCollision(p) && BotNms.onGround(p), false);
+            motor.drive(p, pitDx, pitDz, 1.0, 0f, BotNms.horizontalCollision(p) && BotNms.onGround(p), false);
             return true;
         }
-        if (pitTowerOk && Builder.blockCount(p) >= need && !builder.placeBlocked() && BotNms.onGround(p)) {
+        if (need >= 2 && pitTowerOk && Builder.blockCount(p) >= need && !builder.placeBlocked() && BotNms.onGround(p)) {
             pitTowerTo = fy + need;
             pitTowerBestY = fy;
             pitTowerBestTick = now;
@@ -1609,8 +1615,9 @@ public final class Bot {
     private boolean escapeJump;
     private double escapeBest, escapeStartY;
     private Location escapeTo, escapeGoal;
-    private boolean escapeBelow;
-    private int belowBanUntil;
+    private Drop escapeDrop;
+    private boolean escapeBelow, escapePlatform;
+    private int belowBanUntil, platformChecks, platformCheckAt;
 
     private void recordCrumb(Player p, int now) {
         if (now < nextCrumb || !BotNms.onGround(p) || p.isInsideVehicle()) return;
@@ -1630,43 +1637,82 @@ public final class Bot {
      */
     private void checkTrapped(Player p, int now) {
         if (now < escapeUntil) return;
-        if (pitMode) { trapAnchor = null; return; }
+        if (pitMode) { trapAnchor = null; platformChecks = 0; return; }
         Location l = p.getLocation();
+        // Летающая постройка: под полом пустота. Побыли на ней ~12 секунд, а цель не тут - слезаем.
+        if (now >= platformCheckAt) {
+            platformCheckAt = now + 40;
+            platformChecks = BotNms.onGround(p) && onFloatingFloor(p) ? platformChecks + 1 : 0;
+        }
+        boolean platform = platformChecks >= 6;
         // Спуск (лестница в доме тоже крутится на пятачке) ловушкой не считаем.
         if (trapAnchor == null || !trapAnchor.getWorld().equals(l.getWorld()) || trapAnchor.distanceSquared(l) > 14 * 14
                 || l.getY() < trapAnchor.getY() - 2.5) {
             trapAnchor = l.clone();
             trapSince = now;
-            return;
+            if (!platform) return;
         }
-        if (now - trapSince < 20 * 6) return;
+        if (now - trapSince < 20 * 6 && !platform) return;
         switch (goal) {
             case FIGHT: case DODGE: case EVADE: case HEAL: case DROP: case HOLD: case NUKE: case CAVE:
             case WARDEN: case AVOID_WARDEN: case SHARE: case AIRPIG:
                 return;
             default:
         }
-        Location g = nav.getGoal();
-        if (g == null || !g.getWorld().equals(l.getWorld())) return;
         if (rides.active() || p.isInsideVehicle() || !BotNms.onGround(p)) return;
+        Location g = nav.getGoal();
+        if (g != null && !g.getWorld().equals(l.getWorld())) g = null;
+        if (platform) {
+            // Цель на этой же постройке и до неё есть путь - не уходим.
+            if (g != null && g.getY() > l.getY() - 4 && nav.hasPath() && nav.reaches()) return;
+            startEscape(p, now, false, true, g);
+            return;
+        }
+        if (g == null) return;
         // Цель почти под нами (союзник в доме, а мы на крыше), пути вниз нет: спрыгиваем, не ждём.
         boolean below = now >= belowBanUntil && g.getY() < l.getY() - 3.5
             && Math.hypot(g.getX() - l.getX(), g.getZ() - l.getZ()) < 24 && !(nav.hasPath() && nav.reaches());
         if (!below && (now - trapSince < 20 * 25 || g.distanceSquared(trapAnchor) < 16 * 16)) return;
+        startEscape(p, now, below, false, g);
+    }
+
+    private void startEscape(Player p, int now, boolean below, boolean platform, Location g) {
+        Location l = p.getLocation();
         trapSince = now;
-        escapeUntil = now + 20 * 30;
+        escapeUntil = now + 20 * (platform ? 45 : 30);
         escapeBelow = below;
-        escapeGoal = g.clone();
+        escapePlatform = platform;
+        escapeGoal = g == null ? null : g.clone();
         if (below) belowBanUntil = now + 20 * 40;
-        escapeJump = below || crumbs.size() < 3;
+        if (platform) platformChecks = 0;
+        escapeJump = below || platform || crumbs.size() < 3;
         escapePhaseStart = now;
         escapeBestTick = now;
         escapeBest = Double.MAX_VALUE;
         escapeStartY = l.getY();
         escapeTo = null;
+        escapeDrop = null;
+        fallPrepTried = false;
         nav.clear();
-        if (skill.debug) mgr.debug(name + " застрял" + (below ? " (цель внизу)" : "") + ", выхожу "
-            + (escapeJump ? "прыжком" : "назад по своим следам"));
+        if (skill.debug) mgr.debug(name + " застрял" + (below ? " (цель внизу)" : platform ? " (летающая постройка)" : "")
+            + ", выхожу " + (escapeJump ? "прыжком" : "назад по своим следам"));
+    }
+
+    /** Стоим на летающей постройке: под полом (до 4 блоков толщиной) 10+ блоков пустоты. */
+    private static boolean onFloatingFloor(Player p) {
+        Location l = p.getLocation();
+        World w = p.getWorld();
+        int x = l.getBlockX(), z = l.getBlockZ(), y = (int) Math.floor(l.getY() - 0.001);
+        int floor = 0;
+        while (floor < 5 && !w.getBlockAt(x, y - floor, z).isPassable()) floor++;
+        if (floor == 0 || floor >= 5) return false;
+        int air = 0;
+        for (int yy = y - floor; yy > w.getMinHeight() && air < 10; yy--) {
+            Block b = w.getBlockAt(x, yy, z);
+            if (!b.isPassable() || b.isLiquid()) break;
+            air++;
+        }
+        return air >= 10;
     }
 
     /** Среди следов есть точки заметно ниже: сюда поднялись снизу. */
@@ -1678,6 +1724,8 @@ public final class Bot {
     private void finishEscape() {
         escapeUntil = -1;
         escapeTo = null;
+        escapeDrop = null;
+        escapePlatform = false;
         trapAnchor = null;
         crumbs.clear();
         nav.clear();
@@ -1713,27 +1761,47 @@ public final class Bot {
             return true;
         }
         // Прыжок: к краю, где упасть безопаснее всего, и шаг вниз (без спринта - не прыжок вдаль).
-        if (now - escapePhaseStart > 20 * 12) { finishEscape(); return false; }
-        if (escapeTo == null) {
-            escapeTo = bestDropEdge(p, escapeBelow ? escapeGoal : null);
-            if (escapeTo == null) {
-                // Прыгать к цели некуда. Забрались сюда снизу - спускаемся тем же путём.
-                if (escapeBelow && cameFromBelow(l)) {
-                    escapeBelow = false;
-                    escapeJump = false;
-                    escapePhaseStart = now;
-                    escapeBest = Double.MAX_VALUE;
-                    escapeBestTick = now;
-                    return false;
-                }
-                finishEscape();
+        if (now - escapePhaseStart > 20 * (escapePlatform ? 35 : 15)) { finishEscape(); return false; }
+        if (escapeDrop == null) {
+            Location toward = escapeBelow ? escapeGoal : null;
+            int maxR = escapePlatform ? 32 : escapeBelow ? 12 : 8;
+            double hp = p.getHealth();
+            // Сначала так, чтобы осталось хотя бы 8 хп.
+            escapeDrop = bestDropEdge(p, toward, Math.max(4, hp - 8), maxR);
+            if (escapeDrop == null && escapeBelow && cameFromBelow(l)) {
+                // Забрались сюда снизу - спускаемся тем же путём.
+                escapeBelow = false;
+                escapeJump = false;
+                escapePhaseStart = now;
+                escapeBest = Double.MAX_VALUE;
+                escapeBestTick = now;
                 return false;
             }
-            if (skill.debug) mgr.debug(name + " спрыгивает у " + escapeTo.getBlockX() + "," + escapeTo.getBlockY() + "," + escapeTo.getBlockZ());
+            // Другого пути нет: прыгаем, даже если останется полсердечка.
+            if (escapeDrop == null) escapeDrop = bestDropEdge(p, toward, hp - 1, maxR);
+            if (escapeDrop == null && toward != null) escapeDrop = bestDropEdge(p, null, hp - 1, maxR);
+            if (escapeDrop == null) { finishEscape(); return false; }
+            if (skill.debug) mgr.debug(name + " спрыгивает у " + escapeDrop.land.getBlockX() + "," + escapeDrop.land.getBlockY() + ","
+                + escapeDrop.land.getBlockZ() + " (урон " + escapeDrop.dmg + ", парашютов/зелий " + fallSaverCount(p) + ")");
         }
-        boolean down = escapeBelow ? l.getY() <= escapeTo.getY() + 1.2 : l.getY() < escapeStartY - 2.5;
+        Drop dr = escapeDrop;
+        boolean down = escapeBelow || escapePlatform ? l.getY() <= dr.land.getY() + 1.2 : l.getY() < escapeStartY - 2.5;
         if ((BotNms.onGround(p) || p.isInWater()) && down) { finishEscape(); return false; } // внизу
-        double dx = escapeTo.getX() - l.getX(), dz = escapeTo.getZ() - l.getZ();
+        boolean top = l.getY() > escapeStartY - 1.5;
+        // До края далеко - идём к нему.
+        if (top && BotNms.onGround(p) && l.distanceSquared(dr.stand) > 2.5 * 2.5) {
+            nav.setGoal(dr.stand, 1);
+            Navigator.Move m = nav.tick(p, now);
+            boolean path = m.active && nav.hasPath();
+            double dx = path ? m.dx : dr.stand.getX() - l.getX(), dz = path ? m.dz : dr.stand.getZ() - l.getZ();
+            motor.turn(p, Motor.yawTo(dx, dz), 0f, Math.min(skill.turnSpeed, 20f));
+            motor.drive(p, dx, dz, 1.0, path ? m.strafeBias : 0f,
+                (path && m.jump) || (BotNms.horizontalCollision(p) && BotNms.onGround(p)), false);
+            return true;
+        }
+        // У края, а лететь высоко: парашют в левую руку или зелье медленного падения.
+        if (top && BotNms.onGround(p) && dr.dmg >= 2 && prepareFall(p, now)) return true;
+        double dx = dr.land.getX() - l.getX(), dz = dr.land.getZ() - l.getZ();
         motor.turn(p, Motor.yawTo(dx, dz), 35f, Math.min(skill.turnSpeed, 20f));
         // бортик в блок по краю крыши перепрыгиваем
         motor.drive(p, dx, dz, 1.0, 0f, BotNms.horizontalCollision(p) && BotNms.onGround(p), false);
@@ -1741,51 +1809,169 @@ public final class Bot {
         return true;
     }
 
+    /** Куда спрыгнуть: точка приземления, где стоять перед шагом вниз, урон без парашюта. */
+    private static final class Drop {
+        final Location land, stand;
+        final double dmg;
+        Drop(Location land, Location stand, double dmg) { this.land = land; this.stand = stand; this.dmg = dmg; }
+    }
+
     /**
      * Край, с которого спрыгнуть с наименьшим уроном: внизу вода, слизь, сено или
-     * снег - лучше всего, иначе самая малая высота. Лаву, огонь, кактусы и бездну не берём,
-     * смертельный прыжок тоже.
+     * снег - лучше всего, иначе самая малая высота. Лаву, огонь, кактусы и бездну не берём.
+     * Урон (с поправкой на парашют/зелье) не больше cap и не смертельный.
      */
-    private Location bestDropEdge(Player p, Location toward) {
+    private Drop bestDropEdge(Player p, Location toward, double cap, int maxR) {
         Location l = p.getLocation();
         World w = p.getWorld();
         int fy = l.getBlockY();
-        // К цели внизу (союзник под крышей): прыгаем там, где опустимся до её высоты, поближе
-        // к ней и так, чтобы осталось хотя бы 8 хп.
+        // К цели внизу (союзник под крышей): прыгаем там, где опустимся до её высоты, поближе к ней.
         boolean below = toward != null;
-        Location best = null;
+        // Парашют или зелье: с любой высоты почти без урона (парашют раскрывается за секунду,
+        // до этого пролетаем блоков пять).
+        boolean saver = p.hasPotionEffect(PotionEffectType.SLOW_FALLING) || fallSaverCount(p) > 0;
+        Drop best = null;
         double bestCost = Double.MAX_VALUE;
         for (int a = 0; a < 16; a++) {
             double ang = a * Math.PI / 8, ux = -Math.sin(ang), uz = Math.cos(ang);
-            for (int r = 1; r <= (below ? 12 : 8); r++) {
+            boolean rim = false;
+            int sx = l.getBlockX(), sz = l.getBlockZ();
+            for (int r = 1; r <= maxR; r++) {
                 int x = (int) Math.floor(l.getX() + ux * r), z = (int) Math.floor(l.getZ() + uz * r);
                 Block feet = w.getBlockAt(x, fy, z);
                 Block head = feet.getRelative(org.bukkit.block.BlockFace.UP);
                 // Бортик в блок (не забор) перепрыгнем, дальше по лучу.
                 if (!feet.isPassable() && head.isPassable() && head.getRelative(org.bukkit.block.BlockFace.UP).isPassable()
-                        && !Motor.jumpUseless(p, ux, uz) && feet.getBoundingBox().getMaxY() <= fy + 1.01) continue;
+                        && !Motor.tallAt(w, x, z, fy)) { rim = true; continue; } // забор так не взять
                 if (!feet.isPassable() || !head.isPassable()) break; // стена
-                if (!feet.getRelative(org.bukkit.block.BlockFace.DOWN).isPassable()) continue; // ещё пол
+                if (!feet.getRelative(org.bukkit.block.BlockFace.DOWN).isPassable()) { sx = x; sz = z; continue; } // ещё пол
                 // Край. Шагнув с него, пролетаем ещё блок-два вперёд: смотрим и туда.
                 boolean found = false;
                 for (int k = 0; k <= 2; k++) {
                     int lx = (int) Math.floor(l.getX() + ux * (r + k)), lz = (int) Math.floor(l.getZ() + uz * (r + k));
                     if (k > 0 && !(w.getBlockAt(lx, fy, lz).isPassable() && w.getBlockAt(lx, fy + 1, lz).isPassable())) break;
-                    double dmg = landingDamage(w, lx, fy, lz);
-                    if (dmg < 0 || dmg >= p.getHealth() - 1) continue; // лава, бездна, разобьёмся
-                    if (below && dmg > Math.max(4, p.getHealth() - 8)) continue;
+                    double raw = landingDamage(w, lx, fy, lz);
+                    if (raw < 0) continue; // лава, огонь, бездна
+                    if (rim) raw += 2; // через бортик прыгаем - падать выше
+                    double dmg = saver ? Math.min(raw, 1) : raw;
+                    if (dmg >= p.getHealth() || dmg > cap) continue;
                     double ly = landingY(w, lx, fy, lz);
                     // Скат крыши, ступенька: так вниз к цели не спуститься, край ищем дальше по лучу.
                     if (below && ly > toward.getY() + 2) continue;
                     double cost = dmg * 10 + r + k;
                     if (below) cost += Math.hypot(lx + 0.5 - toward.getX(), lz + 0.5 - toward.getZ()) * 0.7;
                     found = true;
-                    if (cost < bestCost) { bestCost = cost; best = new Location(w, lx + 0.5, ly, lz + 0.5); }
+                    if (cost < bestCost) {
+                        bestCost = cost;
+                        best = new Drop(new Location(w, lx + 0.5, ly, lz + 0.5), new Location(w, sx + 0.5, fy, sz + 0.5), raw);
+                    }
                 }
                 if (found || !below) break; // край на этом луче найден
             }
         }
         return best;
+    }
+
+    // =====================================================================  парашют и зелье медленного падения
+
+    private int chuteSwapSlot = -1, chuteLandAt = -1;
+    private boolean fallPrepTried;
+
+    /** Парашют ExecutableItems: из левой руки в воздухе раз в секунду даёт медленное падение. */
+    static boolean isParachute(ItemStack it) {
+        return "parashut".equalsIgnoreCase(Items.eiId(it));
+    }
+
+    static boolean isSlowFallPotion(ItemStack it) {
+        if (it == null || it.getType() != Material.POTION || !(it.getItemMeta() instanceof org.bukkit.inventory.meta.PotionMeta)) return false;
+        org.bukkit.inventory.meta.PotionMeta pm = (org.bukkit.inventory.meta.PotionMeta) it.getItemMeta();
+        if (pm.getBasePotionType() != null)
+            for (org.bukkit.potion.PotionEffect e : pm.getBasePotionType().getPotionEffects()) if (e.getType().equals(PotionEffectType.SLOW_FALLING)) return true;
+        for (org.bukkit.potion.PotionEffect e : pm.getCustomEffects()) if (e.getType().equals(PotionEffectType.SLOW_FALLING)) return true;
+        return false;
+    }
+
+    static boolean isFallSaver(ItemStack it) {
+        return isParachute(it) || isSlowFallPotion(it);
+    }
+
+    /** Сколько парашютов и зелий медленного падения при себе (с левой рукой). */
+    private static int fallSaverCount(Player p) {
+        int n = 0;
+        PlayerInventory inv = p.getInventory();
+        for (int i = 0; i < 36; i++) if (isFallSaver(inv.getItem(i))) n++;
+        if (isFallSaver(inv.getItemInOffHand())) n++;
+        return n;
+    }
+
+    private void putChuteOffhand(Player p, int slot) {
+        PlayerInventory inv = p.getInventory();
+        ItemStack off = inv.getItemInOffHand();
+        inv.setItemInOffHand(inv.getItem(slot));
+        inv.setItem(slot, off == null || off.getType().isAir() ? null : off);
+        chuteSwapSlot = slot;
+        chuteLandAt = -1;
+    }
+
+    /**
+     * Перед прыжком с высоты: парашют в левую руку (раскроется сам), без него выпиваем
+     * зелье медленного падения. true - ещё готовимся (пьём).
+     */
+    private boolean prepareFall(Player p, int now) {
+        if (p.hasPotionEffect(PotionEffectType.SLOW_FALLING)) return false;
+        PlayerInventory inv = p.getInventory();
+        if (isParachute(inv.getItemInOffHand())) return false;
+        for (int i = 0; i < 36; i++) {
+            if (!isParachute(inv.getItem(i))) continue;
+            putChuteOffhand(p, i);
+            if (skill.debug) mgr.debug(name + " надел парашют");
+            return false;
+        }
+        if (now < busyUntil) { motor.stop(p); return true; } // пьём
+        if (fallPrepTried) return false;
+        int slot = -1;
+        for (int i = 0; i < 36 && slot < 0; i++) if (isSlowFallPotion(inv.getItem(i))) slot = i;
+        if (slot < 0) return false;
+        motor.stop(p);
+        if (!hold(p, slot, now)) return true;
+        BotNms.useItem(p, false);
+        busyUntil = now + 40;
+        fallPrepTried = true;
+        if (skill.debug) mgr.debug(name + " пьёт зелье медленного падения");
+        return true;
+    }
+
+    /**
+     * Падаем с высоты: парашют кладём в левую руку (раскроется сам). Приземлились - через
+     * полторы секунды (раскрытый парашют предмет списывает сам) возвращаем прежнюю вещь.
+     */
+    private void fallGuard(Player p, int now) {
+        PlayerInventory inv = p.getInventory();
+        if (BotNms.onGround(p) || BotNms.inWater(p)) {
+            if (chuteSwapSlot < 0) return;
+            if (chuteLandAt < 0) chuteLandAt = now;
+            if (now - chuteLandAt < 30) return;
+            ItemStack off = inv.getItemInOffHand();
+            ItemStack old = inv.getItem(chuteSwapSlot);
+            boolean chuteLeft = isParachute(off);
+            if ((chuteLeft || off == null || off.getType().isAir()) && old != null && !old.getType().isAir() && !isParachute(old)) {
+                inv.setItemInOffHand(old);
+                inv.setItem(chuteSwapSlot, chuteLeft ? off : null);
+            }
+            chuteSwapSlot = -1;
+            chuteLandAt = -1;
+            return;
+        }
+        chuteLandAt = -1;
+        if (goal == Goal.DROP || p.isInsideVehicle() || p.isGliding() || p.hasPotionEffect(PotionEffectType.SLOW_FALLING)) return;
+        if (p.getFallDistance() < 2.5f || p.getVelocity().getY() > -0.2) return;
+        if (isParachute(inv.getItemInOffHand())) return;
+        for (int i = 0; i < 36; i++) {
+            if (!isParachute(inv.getItem(i))) continue;
+            putChuteOffhand(p, i);
+            if (skill.debug) mgr.debug(name + " падает, раскрывает парашют");
+            return;
+        }
     }
 
     /** Урон от падения в столбец (x,z) с высоты ног fy: вода, слизь, снег - 0; -1 - туда нельзя. */
@@ -2987,6 +3173,7 @@ public final class Bot {
 
     /** Нужен ли ещё такой предмет (не тащим десятый лук и худшую броню). */
     private boolean wantsMore(Player p, ItemStack it) {
+        if (isFallSaver(it)) return fallSaverCount(p) < 2; // парашют/зелье падения: хотя бы один при себе
         Items.Kind k = Items.kind(it, hooks);
         PlayerInventory inv = p.getInventory();
         if (k == Items.Kind.ARMOR) {
@@ -3032,6 +3219,7 @@ public final class Bot {
         if (k == Items.Kind.FOOD && countKind(p, Items.Kind.FOOD) < 12) v = Math.max(v, 9);
         if (isArrow(it.getType()) && (find(p, Items.Kind.BOW) >= 0 || find(p, Items.Kind.CROSSBOW) >= 0)) v = Math.max(v, 12);
         if (Items.isBuildBlock(it) && Builder.blockCount(p) < 48) v = Math.max(v, 7);
+        if (isFallSaver(it) && fallSaverCount(p) == 0) v = Math.max(v, 20);
         if (k == Items.Kind.CUSTOM && Items.customType(it) == Items.Custom.AMMO && hasAnyGun(p)) v = Math.max(v, 14);
         return v;
     }
@@ -3040,6 +3228,7 @@ public final class Bot {
         if (it == null || it.getType().isAir()) return 0;
         if (Rides.vehicleItem(it) != null) return 22; // техника MilitaryCraft
         if (isVest(it)) return 24; // пояс шахида: на крайний случай
+        if (isFallSaver(it)) return 12; // парашют, зелье медленного падения
         if (Items.isBuildBlock(it)) return 4.5;
         if (isTool(it.getType())) return 5;
         if (it.getType() == Material.ARROW || it.getType() == Material.SPECTRAL_ARROW || it.getType() == Material.TIPPED_ARROW) return 9;
@@ -3075,7 +3264,7 @@ public final class Bot {
         }
         ItemStack off = inv.getItemInOffHand();
         Items.Kind offKind = Items.kind(off, hooks);
-        if (offKind != Items.Kind.TOTEM) {
+        if (offKind != Items.Kind.TOTEM && chuteSwapSlot < 0) {
             int totem = find(p, Items.Kind.TOTEM);
             int shield = find(p, Items.Kind.SHIELD);
             int pick = totem >= 0 ? totem : (offKind == Items.Kind.NONE ? shield : -1);
@@ -3119,7 +3308,11 @@ public final class Bot {
         }
         // Бафф перед боем.
         if (target != null && target.visible && mgr.now() >= nextBuff) {
-            int buff = find(p, Items.Kind.BUFF);
+            int buff = -1;
+            for (int i = 0; i < 36 && buff < 0; i++) {
+                ItemStack bi = p.getInventory().getItem(i);
+                if (Items.kind(bi, hooks) == Items.Kind.BUFF && !isSlowFallPotion(bi)) buff = i;
+            }
             if (buff >= 0 && hold(p, buff, mgr.now())) {
                 BotNms.useItem(p, false);
                 busyUntil = mgr.now() + 35;
@@ -3949,6 +4142,7 @@ public final class Bot {
             if (it == null || it.getType().isAir()) continue;
             if (hooks.isNukeButton(it) || it.getType() == Material.FILLED_MAP) continue;
             if (Rides.vehicleItem(it) != null) continue;
+            if (isFallSaver(it)) continue; // держим, пока не понадобится
             if (now() < busyUntil && i == inv.getHeldItemSlot()) continue;
             Items.Kind k = Items.kind(it, hooks);
             if (Items.isBuildBlock(it)) {
@@ -4120,6 +4314,7 @@ public final class Bot {
 
     /** Пригодится ли предмет союзнику (у него нет такого или есть хуже, и ему этого не хватает). */
     private boolean usefulFor(Player mate, ItemStack it) {
+        if (isFallSaver(it)) return false; // свой парашют не отдаём
         PlayerInventory inv = mate.getInventory();
         Items.Kind k = Items.kind(it, hooks);
         switch (k) {

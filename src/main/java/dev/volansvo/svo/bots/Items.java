@@ -55,10 +55,17 @@ public final class Items {
         MATCH.put(type, low);
     }
 
+    private static final NamespacedKey EI_ID = new NamespacedKey("executableitems", "ei-id");
+
     /** id предмета ExecutableItems (PDC executableitems:*) или null. */
     public static String eiId(ItemStack it) {
         if (it == null || !it.hasItemMeta()) return null;
-        PersistentDataContainer pdc = it.getItemMeta().getPersistentDataContainer();
+        // Метки читаем без копии ItemMeta: проверки предметов у ботов идут очень часто.
+        io.papermc.paper.persistence.PersistentDataContainerView pdc = it.getPersistentDataContainer();
+        try {
+            String id = pdc.get(EI_ID, PersistentDataType.STRING);
+            if (id != null && !id.isEmpty()) return id;
+        } catch (Throwable ignored) {}
         for (NamespacedKey k : pdc.getKeys()) {
             if (!k.getNamespace().equalsIgnoreCase("executableitems")) continue;
             try {
@@ -116,13 +123,12 @@ public final class Items {
     /** id MilitaryCraft или null. */
     public static String warkitId(ItemStack it) {
         if (it == null || !it.hasItemMeta()) return null;
-        PersistentDataContainer pdc = it.getItemMeta().getPersistentDataContainer();
-        return pdc.get(WARKIT_ID, PersistentDataType.STRING);
+        return it.getPersistentDataContainer().get(WARKIT_ID, PersistentDataType.STRING);
     }
 
     public static int ammo(ItemStack it) {
         if (it == null || !it.hasItemMeta()) return -1;
-        Integer a = it.getItemMeta().getPersistentDataContainer().get(WARKIT_AMMO, PersistentDataType.INTEGER);
+        Integer a = it.getPersistentDataContainer().get(WARKIT_AMMO, PersistentDataType.INTEGER);
         return a == null ? -1 : a;
     }
 
@@ -256,8 +262,8 @@ public final class Items {
     /** Предмет помечен другим плагином: свои PDC-ключи, модель или имя. */
     public static boolean isCustom(ItemStack it) {
         if (!it.hasItemMeta()) return false;
+        if (!it.getPersistentDataContainer().getKeys().isEmpty()) return true;
         ItemMeta m = it.getItemMeta();
-        if (!m.getPersistentDataContainer().getKeys().isEmpty()) return true;
         if (m.hasCustomModelData()) return true;
         try { if (m.hasItemModel()) return true; } catch (Throwable ignored) {}
         return false;

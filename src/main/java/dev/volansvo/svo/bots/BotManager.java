@@ -242,8 +242,16 @@ public final class BotManager implements Listener {
 
     ItemLearning learning() { return learning; }
 
+    private final Map<String, Integer> warnedAt = new HashMap<String, Integer>();
+
+    /** Ошибка в мозгу бота: пишем сразу, ту же повторно не чаще раза в 10 секунд. */
     void warn(String where, Throwable t) {
-        if (tick % 200 == 0) plugin.getLogger().log(Level.WARNING, "[Боты] " + where, t);
+        String key = where + "|" + t;
+        Integer last = warnedAt.get(key);
+        if (last != null && tick - last < 200) return;
+        warnedAt.put(key, tick);
+        if (warnedAt.size() > 200) warnedAt.clear();
+        plugin.getLogger().log(Level.WARNING, "[Боты] " + where, t);
     }
 
     void debug(String msg) {
