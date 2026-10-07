@@ -41,6 +41,8 @@ public final class Navigator {
     private int stuckTicks = 0;
     private double bestDist = Double.MAX_VALUE;
     private int failures = 0;
+    /** Путь может уходить за границу зоны (бот как раз уходит от неё). */
+    public boolean allowOutsideZone;
     private int unstuckTicks = 0;
     private float unstuckStrafe = 0f;
 
@@ -201,14 +203,19 @@ public final class Navigator {
             steps = null;
             return;
         }
-        // Путь, который выходит за границу зоны (бот сам внутри), не берём - обходим.
+        // Путь, который уходит в зону (бот сам внутри), не берём - обходим. Ненадолго выйти
+        // за край (обогнуть дом у границы) можно.
         org.bukkit.WorldBorder wb = p.getWorld().getWorldBorder();
-        if (wb.isInside(p.getLocation())) {
+        if (!allowOutsideZone && wb.isInside(p.getLocation())) {
+            double half = wb.getSize() / 2, cx = wb.getCenter().getX(), cz = wb.getCenter().getZ();
             int outside = 0;
+            boolean deep = false;
             for (PathProbe.Step st : r.steps) {
-                if (!wb.isInside(new Location(p.getWorld(), st.x + 0.5, st.y, st.z + 0.5))) outside++;
+                double out = Math.max(Math.abs(st.x + 0.5 - cx), Math.abs(st.z + 0.5 - cz)) - half;
+                if (out > 0) outside++;
+                if (out > 4) deep = true;
             }
-            if (outside > 0) {
+            if (deep || outside > 12) {
                 failures++;
                 steps = null;
                 return;
@@ -265,7 +272,7 @@ public final class Navigator {
             if (!(data instanceof Openable)) continue;
             String type = b.getType().name();
             if (type.startsWith("IRON_")) continue; // железные руками не открыть
-            if (!type.endsWith("_DOOR") && !type.endsWith("_FENCE_GATE")) continue;
+            if (!type.endsWith("_DOOR") && !type.endsWith("_FENCE_GATE") && !(dy == 1 && type.endsWith("_TRAPDOOR"))) continue;
             Openable o = (Openable) data;
             if (o.isOpen()) continue;
             o.setOpen(true);

@@ -417,7 +417,7 @@ public final class BotManager implements Listener {
                 + (killer != null ? " от " + killer.getName() : "") + " | " + b.debug());
         }
         b.onDeath();
-        chat(dead, deathTopic(dead, killer), 0.5, killer == null ? null : killer.getName(), dead.getName());
+        chatNow(dead, deathTopic(dead, killer), killer == null ? null : killer.getName(), dead.getName()); // о своей смерти пишет всегда
         // У бота нет кнопки «Возродиться» - жмём её сами через тик.
         Bukkit.getScheduler().runTaskLater(plugin, () -> {
             Player p = Bukkit.getPlayer(b.id);
@@ -601,6 +601,28 @@ public final class BotManager implements Listener {
         final org.bukkit.World w = p.getWorld();
         final String name = p.getName();
         long delay = 15L + rnd.nextInt(30);
+        Bukkit.getScheduler().runTaskLater(plugin, () -> worldMessage(w, name, msg), delay);
+        BotChatter.Topic r = BotChatter.replyTo(t);
+        if (r != null && rnd.nextDouble() < 0.35) {
+            final Player other = randomOtherBot(w, p.getUniqueId());
+            if (other != null) {
+                final String answer = fill(pick(r), killer, victim, name);
+                Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    if (other.isOnline() && answer != null) worldMessage(w, other.getName(), answer);
+                }, delay + 30L + rnd.nextInt(50));
+            }
+        }
+    }
+
+    /** Реплика без шанса и без очереди общего чата (о своей смерти), иногда с ответом другого бота. */
+    void chatNow(Player p, BotChatter.Topic t, String killer, String victim) {
+        if (!skill.chat) return;
+        final String msg = fill(pick(t), killer, victim, null);
+        if (msg == null) return;
+        lastGlobalChat = tick;
+        final org.bukkit.World w = p.getWorld();
+        final String name = p.getName();
+        long delay = 10L + rnd.nextInt(20);
         Bukkit.getScheduler().runTaskLater(plugin, () -> worldMessage(w, name, msg), delay);
         BotChatter.Topic r = BotChatter.replyTo(t);
         if (r != null && rnd.nextDouble() < 0.35) {
