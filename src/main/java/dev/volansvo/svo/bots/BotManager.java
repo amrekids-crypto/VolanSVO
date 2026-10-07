@@ -397,7 +397,7 @@ public final class BotManager implements Listener {
                 for (Map.Entry<UUID, UUID> en : recentKills.entrySet()) {
                     if (dead.getUniqueId().equals(en.getValue()) && hooks.sameTeam(killer.getUniqueId(), en.getKey())) { revenge = true; break; }
                 }
-                chat(killer, revenge ? BotChatter.Topic.KILL_REVENGE : BotChatter.Topic.KILL, 0.5, killer.getName(), dead.getName());
+                chat(killer, revenge ? BotChatter.Topic.KILL_REVENGE : BotChatter.Topic.KILL, 0.8, killer.getName(), dead.getName());
             }
         }
         if (killer != null && !killer.equals(dead)) recentKills.put(dead.getUniqueId(), killer.getUniqueId());
@@ -409,7 +409,7 @@ public final class BotManager implements Listener {
                 + (killer != null ? " от " + killer.getName() : "") + " | " + b.debug());
         }
         b.onDeath();
-        chat(dead, deathTopic(dead, killer), 0.5, killer == null ? null : killer.getName(), dead.getName());
+        chat(dead, deathTopic(dead, killer), 0.7, killer == null ? null : killer.getName(), dead.getName());
         // У бота нет кнопки «Возродиться» - жмём её сами через тик.
         Bukkit.getScheduler().runTaskLater(plugin, () -> {
             Player p = Bukkit.getPlayer(b.id);
@@ -469,6 +469,12 @@ public final class BotManager implements Listener {
         if (gw == null || !plugin.getGameManager().isGameRunning()) return;
         if (!hooks.inGame(p.getUniqueId()) && !plugin.getGameManager().isInQueue(p)) return;
         if (e.getFrom().getWorld().equals(gw) && !e.getTo().getWorld().equals(gw)) e.setCancelled(true);
+    }
+
+    /** Достижения ботов в чат не пишем. */
+    @EventHandler
+    public void onBotAdvancement(org.bukkit.event.player.PlayerAdvancementDoneEvent e) {
+        if (isBot(e.getPlayer())) e.message(null);
     }
 
     /** Подключить отрисовку ботов к карте с этим id (один раз). */
@@ -589,7 +595,7 @@ public final class BotManager implements Listener {
         long delay = 15L + rnd.nextInt(30);
         Bukkit.getScheduler().runTaskLater(plugin, () -> worldMessage(w, name, msg), delay);
         BotChatter.Topic r = BotChatter.replyTo(t);
-        if (r != null && rnd.nextDouble() < 0.35) {
+        if (r != null && rnd.nextDouble() < 0.5) {
             final Player other = randomOtherBot(w, p.getUniqueId());
             if (other != null) {
                 final String answer = fill(pick(r), killer, victim, name);
@@ -671,7 +677,7 @@ public final class BotManager implements Listener {
             chat(alive.get(rnd.nextInt(alive.size())), BotChatter.Topic.LAST_ALIVE, 0.6, null, null);
         }
         if (tick >= nextSmallTalk && alive.size() >= 2) {
-            nextSmallTalk = tick + 20 * (70 + rnd.nextInt(110));
+            nextSmallTalk = tick + 20 * (45 + rnd.nextInt(65));
             if (!skill.chat || tick - lastGlobalChat < 100) return;
             Player a = alive.get(rnd.nextInt(alive.size()));
             Player b = randomOtherBot(a.getWorld(), a.getUniqueId());

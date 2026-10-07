@@ -13,7 +13,7 @@ import java.util.List;
  * /svoteam               - открыть GUI выбора команды
  * /svoteam approve <ник> - одобрить заявку игрока в твою команду
  * /svoteam leave         - выйти из команды
- * /svoteam ready         - (инициатор) завершить формирование досрочно
+ * /svoteam ready         - «Начинаем»: готов к старту (готовы все - формирование заканчивается)
  */
 public class SvoTeamCommand implements CommandExecutor, TabCompleter {
 

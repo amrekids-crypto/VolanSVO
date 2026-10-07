@@ -61,6 +61,11 @@ public class GameManager {
     private final Map<Integer, LinkedHashSet<UUID>> joinRequests = new HashMap<Integer, LinkedHashSet<UUID>>();
     private BukkitTask formationTask = null;
     private int formationSecondsLeft = 0;
+    /** Кто нажал «Начинаем»: когда нажмут все в очереди, формирование заканчивается сразу. */
+    private final Set<UUID> formReady = new HashSet<UUID>();
+    private boolean formationFinishing = false;
+    /** Слот кнопки «Начинаем» в меню команд. */
+    public static final int TEAM_GUI_READY_SLOT = 22;
     /** Заранее заданное распределение по командам (player -> уникальный номер команды). null = рандом. */
     private Map<UUID, Integer> predeterminedTeams = null;
     /** Боты, которых хост поставил в команды при ручном формировании: индекс команды -> сколько. */
@@ -758,6 +763,7 @@ public class GameManager {
 
     /** Убирает игрока из команд/заявок формирования (при выходе из очереди). */
     private void removeFromFormation(UUID uid) {
+        formReady.remove(uid);
         // Снимаем все его заявки на вступление.
         for (LinkedHashSet<UUID> s : joinRequests.values()) s.remove(uid);
         Integer tid = formPlayerTeam.remove(uid);
@@ -769,6 +775,7 @@ public class GameManager {
             }
         }
         refreshGuiForQueue();
+        checkFormationReady(); // ушёл последний, кто ещё не был готов
     }
 
     public boolean isInQueue(Player player) { return queue.contains(player.getUniqueId()); }
@@ -881,6 +888,8 @@ public class GameManager {
         formPlayerTeam.clear();
         formTeams.clear();
         joinRequests.clear();
+        formReady.clear();
+        formationFinishing = false;
         formNextId = 100;
         state = GameState.TEAM_FORMATION;
         formationSession = s; // параметры уже согласованы голосованием
@@ -889,6 +898,8 @@ public class GameManager {
         broadcastQueue(ChatColor.GRAY + "Открой меню команд: " + ChatColor.WHITE + "/svoteam");
         broadcastQueue(ChatColor.GRAY + "Размер команды: " + ChatColor.WHITE + s.teamSize
             + ChatColor.GRAY + ". У вас 60 секунд. Кто не в команде - попадёт в случайную.");
+        broadcastQueue(ChatColor.GRAY + "Когда все нажмут " + ChatColor.GREEN + "«Начинаем»"
+            + ChatColor.GRAY + " (в меню команд или в чате), игра стартует сразу.");
         Player host = formationInitiator != null ? Bukkit.getPlayer(formationInitiator) : null;
         if (host != null) {
             host.sendMessage(ChatColor.AQUA + "Ты хост: в меню команд " + ChatColor.WHITE + "ПКМ"
@@ -897,6 +908,7 @@ public class GameManager {
         }
         // Открываем GUI всем в очереди.
         for (Player p : getQueuedPlayers()) openTeamGui(p);
+        sendOpenGuiButton();
 
         formationSecondsLeft = 60;
         if (formationTask != null) formationTask.cancel();
@@ -918,14 +930,19 @@ public class GameManager {
         }.runTaskTimer(plugin, 20L, 20L);
     }
 
-    /** Рассылает всем в очереди кликабельную кнопку "Открыть меню команд". */
+    /** Рассылает всем в очереди кликабельные кнопки "Открыть меню команд" и "Начинаем". */
     private void sendOpenGuiButton() {
         for (Player p : getQueuedPlayers()) {
             String tellraw = "tellraw " + p.getName() + " [\"\""
                 + ",{\"text\":\"[Открыть меню команд]\",\"color\":\"aqua\",\"bold\":true"
                 + ",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/svoteam\"}"
-                + ",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"Выбрать или сменить команду\"}}]";
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), tellraw);
+                + ",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"Выбрать или сменить команду\"}}";
+            if (!formReady.contains(p.getUniqueId())) {
+                tellraw += ",{\"text\":\" \"},{\"text\":\"[Начинаем]\",\"color\":\"green\",\"bold\":true"
+                    + ",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/svoteam ready\"}"
+                    + ",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"Я готов. Когда нажмут все, игра стартует сразу\"}}";
+            }
+            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), tellraw + "]");
         }
     }
 
@@ -1514,6 +1531,15 @@ public class GameManager {
         }
         inv.setItem(26, info);
 
+        // «Начинаем»: когда её нажмут все в очереди, игра стартует, не дожидаясь таймера.
+        int[] rc = readyCount();
+        String readyLine = ChatColor.GRAY + "Готовы: " + ChatColor.WHITE + rc[0] + "/" + rc[1];
+        inv.setItem(TEAM_GUI_READY_SLOT, formReady.contains(viewer.getUniqueId())
+            ? setupItem(Material.EMERALD_BLOCK, ChatColor.GREEN + "" + ChatColor.BOLD + "Ты готов",
+                readyLine, ChatColor.YELLOW + "Нажми ещё раз, чтобы отменить")
+            : setupItem(Material.LIME_CONCRETE, ChatColor.GREEN + "" + ChatColor.BOLD + "Начинаем",
+                readyLine, ChatColor.GRAY + "Когда нажмут все, игра стартует сразу"));
+
         viewer.openInventory(inv);
     }
 
@@ -1535,6 +1561,7 @@ public class GameManager {
             });
             return;
         }
+        if (slot == TEAM_GUI_READY_SLOT) { setFormationReady(viewer, !formReady.contains(viewer.getUniqueId())); return; }
         if (slot < 0 || slot >= TEAM_COUNT) return; // клик не по команде
         int target = slot;
 
@@ -1699,16 +1726,52 @@ public class GameManager {
         return String.join(", ", names);
     }
 
-    /** /svoteam ready - досрочно завершить формирование (только инициатор). */
+    /** /svoteam ready (кнопка «Начинаем» в чате): игрок готов начинать. */
     public void formationReady(Player p) {
         if (!formationActive) { p.sendMessage(ChatColor.RED + "Сейчас нет формирования команд."); return; }
-        if (!p.getUniqueId().equals(formationInitiator)) {
-            p.sendMessage(ChatColor.RED + "Завершить формирование может только инициатор ("
-                + nameOf(formationInitiator) + ").");
+        if (formReady.contains(p.getUniqueId())) {
+            int[] c = readyCount();
+            p.sendMessage(ChatColor.YELLOW + "Ты уже готов, ждём остальных (" + c[0] + "/" + c[1] + ").");
             return;
         }
+        setFormationReady(p, true);
+    }
+
+    /** Отметка «Начинаем» или её отмена. Когда готовы все в очереди, игра стартует сразу. */
+    private void setFormationReady(Player p, boolean ready) {
+        if (!formationActive || formationFinishing) return;
+        if (!queue.contains(p.getUniqueId())) { p.sendMessage(ChatColor.RED + "Ты не в очереди."); return; }
+        boolean changed = ready ? formReady.add(p.getUniqueId()) : formReady.remove(p.getUniqueId());
+        if (!changed) return;
+        int[] c = readyCount();
+        broadcastQueue((ready ? ChatColor.GREEN + p.getName() + " готов начинать"
+            : ChatColor.YELLOW + p.getName() + " пока не готов") + ChatColor.GRAY + " (" + c[0] + "/" + c[1] + ")");
+        if (!checkFormationReady()) refreshGuiForQueue();
+    }
+
+    /** {готовы, всего} среди тех, кто сейчас в очереди. */
+    private int[] readyCount() {
+        int ready = 0, all = 0;
+        for (Player q : getQueuedPlayers()) {
+            all++;
+            if (formReady.contains(q.getUniqueId())) ready++;
+        }
+        return new int[]{ready, all};
+    }
+
+    /** Все в очереди нажали «Начинаем»: заканчиваем формирование, не дожидаясь таймера. */
+    private boolean checkFormationReady() {
+        if (!formationActive || formationFinishing) return false;
+        int[] c = readyCount();
+        if (c[1] == 0 || c[0] < c[1]) return false;
+        formationFinishing = true;
         if (formationTask != null) { formationTask.cancel(); formationTask = null; }
-        finishTeamFormation();
+        broadcastQueue(ChatColor.GREEN + "" + ChatColor.BOLD + "Все готовы, начинаем!");
+        // Следующим тиком: старт телепортирует и закрывает меню, а мы можем быть внутри клика по нему.
+        Bukkit.getScheduler().runTask(plugin, new Runnable() {
+            @Override public void run() { if (formationActive) finishTeamFormation(); }
+        });
+        return true;
     }
 
     private String nameOf(UUID uid) {
@@ -1825,6 +1888,7 @@ public class GameManager {
         formPlayerTeam.clear();
         formTeams.clear();
         joinRequests.clear();
+        formReady.clear();
         predeterminedTeams = null;
         if (state == GameState.TEAM_FORMATION) state = GameState.QUEUE;
     }

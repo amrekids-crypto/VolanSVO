@@ -376,6 +376,7 @@ public final class Bot {
         watchdog(p, now);
         recordCrumb(p, now);
         checkTrapped(p, now);
+        checkPit(p, now);
         maybeCryForHelp(p, now);
         if (kamikaze && goal != Goal.FIGHT) stopKamikaze(p, now);
         if (p.getHealth() > 14) lowHpSaid = false;
@@ -391,7 +392,7 @@ public final class Bot {
                 case HEAL: talk(p, BotChatter.Topic.T_HEAL, 0.08, 20 * 60, null); break;
                 case DODGE: talk(p, BotChatter.Topic.T_DODGE, 0.25, 20 * 30, null); break;
                 case CHASE:
-                    if (target != null && target.entity instanceof Player) talk(p, BotChatter.Topic.CHASE, 0.05, 20 * 90, target.entity.getName());
+                    if (target != null && target.entity instanceof Player) talk(p, BotChatter.Topic.CHASE, 0.25, 20 * 60, target.entity.getName());
                     break;
                 default:
             }
@@ -780,6 +781,14 @@ public final class Bot {
                 && goal != Goal.DROP && goal != Goal.HEAL) {
             if (escapeStep(p, now)) return;
         }
+
+        // В яме (стенки выше прыжка, пути к цели нет): столб под себя у стенки или ступеньки.
+        if (pitMode && goal != Goal.DROP && goal != Goal.HEAL && goal != Goal.DODGE && goal != Goal.EVADE
+                && pitStep(p, now)) return;
+
+        // Враг улетел дроном, его тело рядом - ломаем (пилот погибнет, когда вернётся).
+        if (goal != Goal.DROP && goal != Goal.HEAL && goal != Goal.DODGE && goal != Goal.ZONE && goal != Goal.NUKE
+                && !p.isInsideVehicle() && !rides.active() && bodyStep(p, now)) return;
 
         Location rideWalk = rides.walkTarget();
         if (rideWalk != null) {
@@ -1173,6 +1182,242 @@ public final class Bot {
 
 
 
+
+    // =====================================================================  яма
+
+    private boolean pitMode, pitTowerOk, pitKeepUp;
+    private int pitInChecks, pitOutChecks, pitCheckAt, pitUntil, pitBanUntil, pitDx, pitDz;
+    private int pitTowerTo = Integer.MIN_VALUE, pitTowerBestY, pitTowerBestTick;
+
+    /** Сколько твёрдых блоков стоит столбиком в (x,z) от уровня ног fy вверх (до 8). */
+    private static int colHeight(World w, int x, int fy, int z) {
+        int n = 0;
+        while (n < 8 && !w.getBlockAt(x, fy + n, z).isPassable()) n++;
+        return n;
+    }
+
+    /**
+     * Яма: в каждую из 4 сторон в пределах 8 блоков стенка в 2+ блока, на которую не
+     * запрыгнуть. {высота самой низкой стенки, dx, dz к ней}; null - не яма.
+     */
+    private static int[] pitShape(Player p) {
+        Location l = p.getLocation();
+        World w = p.getWorld();
+        int fy = (int) Math.floor(l.getY() + 0.01), x0 = l.getBlockX(), z0 = l.getBlockZ();
+        int[] best = null;
+        int bestR = 0;
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int[] d : dirs) {
+            int h = 0, r = 1;
+            for (; r <= 8; r++) {
+                int x = x0 + d[0] * r, z = z0 + d[1] * r;
+                // Пол уходит вниз - туда можно спуститься, это не яма.
+                if (w.getBlockAt(x, fy - 1, z).isPassable() && w.getBlockAt(x, fy - 2, z).isPassable()) return null;
+                h = colHeight(w, x, fy, z);
+                if (h > 0) break;
+            }
+            if (h <= 1) return null; // в эту сторону выходим пешком или прыжком
+            if (best == null || h < best[0] || h == best[0] && r < bestR) { best = new int[]{h, d[0], d[1]}; bestR = r; }
+        }
+        return best;
+    }
+
+    /** Есть чем стрелять издалека: из ямы тогда отстреливаемся, а не лезем наверх. */
+    private boolean hasRanged(Player p, int now) {
+        return hasGun(p) || find(p, Items.Kind.BOW) >= 0 && hasArrows(p)
+            || findEi(p, Items.Custom.AUTO, now, true) >= 0 || findEi(p, Items.Custom.SHOTGUN, now, true) >= 0;
+    }
+
+    /** Бой не даёт лезть из ямы: враг рядом или его можно достать отсюда. */
+    private boolean pitFightBusy(Player p, int now) {
+        if (goal != Goal.FIGHT || target == null || !target.visible) return false;
+        double d = target.last.distance(p.getLocation());
+        return d < 4 || hasRanged(p, now);
+    }
+
+    /** Цель снаружи ямы, а пути к ней нет. */
+    private boolean goalOutsidePit(Player p) {
+        Location l = p.getLocation();
+        Location g = goal == Goal.FIGHT && target != null ? target.last : nav.getGoal();
+        if (g == null || !g.getWorld().equals(l.getWorld())) return false;
+        if (g.getY() < l.getY() + 1.5 && Math.hypot(g.getX() - l.getX(), g.getZ() - l.getZ()) <= 8) return false; // цель тут же, в яме
+        return !(nav.hasPath() && nav.reaches());
+    }
+
+    /**
+     * Сидим в яме (стенки выше прыжка) 3 секунды, и цель не раз была снаружи без пути к
+     * ней - выбираемся. Цель в яме при этом может мелькать (подбор выпавших блоков, точка
+     * прогулки), это решение не сбивает.
+     */
+    private void checkPit(Player p, int now) {
+        if (now < pitCheckAt) return;
+        pitCheckAt = now + 10;
+        if (pitMode) {
+            if (now > pitUntil) {
+                if (skill.debug) mgr.debug(name + " не выбрался из ямы");
+                stopPit(p, now, 20 * 60);
+            }
+            return;
+        }
+        if (now < pitBanUntil || !BotNms.onGround(p) || p.isInsideVehicle() || rides.active() || BotNms.inWater(p)) return;
+        if (pitShape(p) == null) { pitInChecks = 0; pitOutChecks = 0; return; }
+        pitInChecks++;
+        if (goalOutsidePit(p)) pitOutChecks++;
+        switch (goal) {
+            case DROP: case HEAL: case DODGE: case EVADE: case NUKE: case CAVE: case PICKUP: case PICK_NUKE:
+                return;
+            default:
+        }
+        if (pitFightBusy(p, now) || pitInChecks < 6 || pitOutChecks < 3) return;
+        int[] s = pitShape(p);
+        if (s == null) return;
+        pitInChecks = 0;
+        pitOutChecks = 0;
+        finishEscape(); // ловушку крыши тут не ищем, своё
+        pitMode = true;
+        pitUntil = now + 20 * 45;
+        pitDx = s[1];
+        pitDz = s[2];
+        pitTowerOk = true;
+        pitTowerTo = Integer.MIN_VALUE;
+        nav.clear();
+        if (skill.debug) mgr.debug(name + " в яме (стенка " + s[0] + "), выбираюсь " + (Builder.blockCount(p) >= s[0] ? "столбом" : "ступеньками"));
+    }
+
+    private void stopPit(Player p, int now, int ban) {
+        pitMode = false;
+        pitInChecks = 0;
+        pitOutChecks = 0;
+        pitTowerTo = Integer.MIN_VALUE;
+        pitBanUntil = now + ban;
+        nav.clear();
+        BotNms.input(p, 0f, 0f, false);
+    }
+
+    /**
+     * Выбираемся из ямы: идём к самой низкой стенке; блоков хватает - столб под себя
+     * вплотную к ней и шаг на край, не хватает - рубим в стенке ступеньки (с них и блоки).
+     * true - тик занят.
+     */
+    private boolean pitStep(Player p, int now) {
+        if (pitFightBusy(p, now)) return false; // отбиваемся отсюда, выбираться потом
+        Location l = p.getLocation();
+        World w = p.getWorld();
+        int fy = (int) Math.floor(l.getY() + 0.01), x = l.getBlockX(), z = l.getBlockZ();
+        if (pitTowerTo != Integer.MIN_VALUE) {
+            if (fy > pitTowerBestY) { pitTowerBestY = fy; pitTowerBestTick = now; }
+            if (fy < pitTowerTo && now - pitTowerBestTick <= 60 && builder.tower(p, pitTowerTo, now)) return true;
+            if (fy < pitTowerTo) pitTowerOk = false; // столб не растёт (потолок, нельзя строить) - ступеньки
+            pitTowerTo = Integer.MIN_VALUE;
+        }
+        if (now % 10 == 0 && BotNms.onGround(p) && pitShape(p) == null) {
+            if (skill.debug) mgr.debug(name + " выбрался из ямы");
+            stopPit(p, now, 20 * 10);
+            return false;
+        }
+        int need = colHeight(w, x + pitDx, fy, z + pitDz);
+        if (need <= 1) {
+            // До стенки ещё идти, или осталась ступенька в блок - шагаем (с прыжком).
+            motor.turn(p, Motor.yawTo(pitDx, pitDz), 0f, Math.min(skill.turnSpeed, 20f));
+            motor.drive(p, pitDx, pitDz, 1.0, 0f, need == 1 && BotNms.onGround(p) || BotNms.horizontalCollision(p) && BotNms.onGround(p), false);
+            return true;
+        }
+        if (pitTowerOk && Builder.blockCount(p) >= need && !builder.placeBlocked() && BotNms.onGround(p)) {
+            pitTowerTo = fy + need;
+            pitTowerBestY = fy;
+            pitTowerBestTick = now;
+            motor.stop(p);
+            if (builder.tower(p, pitTowerTo, now)) return true;
+            pitTowerOk = false;
+            pitTowerTo = Integer.MIN_VALUE;
+        }
+        // Ступеньки вверх в стенке (не сворачиваем на ровный проход).
+        caveDx = pitDx;
+        caveDz = pitDz;
+        pitKeepUp = true;
+        tunnel(p, now, pitDx, pitDz, 1);
+        pitKeepUp = false;
+        pitDx = caveDx;
+        pitDz = caveDz;
+        return true;
+    }
+
+    // =====================================================================  тело пилота дрона
+
+    private ArmorStand pilotBody;
+    private int nextBodyScan, bodyHitTick = -100;
+
+    /** Ник пилота, чьё это тело: стойка с его ником в тегах, а сам он сейчас летит дроном. */
+    private static String pilotOf(Entity stand) {
+        for (String t : stand.getScoreboardTags()) {
+            Player o = org.bukkit.Bukkit.getPlayerExact(t);
+            if (o == null || o.getGameMode() != GameMode.SPECTATOR) continue;
+            java.util.Set<String> tags = o.getScoreboardTags();
+            if (tags.contains("fpvfly") || tags.contains("bombfly")) return o.getName();
+        }
+        return null;
+    }
+
+    /** Ближайшее видимое тело вражеского пилота (bfpv, bombsender) в 30 блоках. */
+    private ArmorStand findPilotBody(Player p) {
+        ArmorStand best = null;
+        double bd = 30 * 30;
+        for (Entity e : p.getNearbyEntities(30, 15, 30)) {
+            if (!(e instanceof ArmorStand) || e.isDead()) continue;
+            ArmorStand a = (ArmorStand) e;
+            if (a.isInvisible() || a.isMarker()) continue;
+            String owner = pilotOf(a);
+            if (owner == null || owner.equals(name) || isTeammateName(owner)) continue;
+            double d = a.getLocation().distanceSquared(p.getLocation());
+            if (d < bd && p.hasLineOfSight(a)) { bd = d; best = a; }
+        }
+        return best;
+    }
+
+    /**
+     * Враг улетел дроном, а его тело (стойка с головой) стоит тут: ломаем, без тела он
+     * погибает, когда вернётся. Стойка ломается от двух ударов подряд (за 5 тиков).
+     * true - тик занят.
+     */
+    private boolean bodyStep(Player p, int now) {
+        if (now >= nextBodyScan) {
+            nextBodyScan = now + 10;
+            pilotBody = findPilotBody(p);
+        }
+        ArmorStand b = pilotBody;
+        if (b == null || b.isDead() || !b.isValid()) { pilotBody = null; return false; }
+        Location l = p.getLocation(), bl = b.getLocation();
+        double d = bl.distance(l);
+        if ((goal == Goal.FIGHT || goal == Goal.CHASE) && d > 10) return false; // свой бой важнее дальнего тела
+        Location aim = bl.clone().add(0, 1.0, 0);
+        double dx = bl.getX() - l.getX(), dz = bl.getZ() - l.getZ();
+        if (d > 2.6) {
+            nav.setGoal(bl, 1);
+            Navigator.Move m = nav.tick(p, now);
+            if (m.active && nav.hasPath()) motor.drive(p, m.dx, m.dz, 1.0, m.strafeBias, m.jump, true);
+            else motor.drive(p, dx, dz, 1.0, 0f, BotNms.horizontalCollision(p) && BotNms.onGround(p), true);
+            motor.turn(p, yawTo(p, aim), pitchTo(p, aim), skill.turnSpeed);
+            return true;
+        }
+        motor.drive(p, dx, dz, 0.2, 0f, false, false);
+        Location eye = p.getEyeLocation();
+        BotNms.look(p, Motor.yawTo(aim.getX() - eye.getX(), aim.getZ() - eye.getZ()),
+            Motor.pitchTo(aim.getX() - eye.getX(), aim.getY() - eye.getY(), aim.getZ() - eye.getZ()));
+        motor.sync(p);
+        int slot = freeHandSlot(p);
+        if (slot >= 0 && p.getInventory().getHeldItemSlot() != slot && !punchable(p.getInventory().getItemInMainHand())) hold(p, slot, now);
+        if (now - bodyHitTick > 12) {
+            BotNms.attack(p, b);
+            bodyHitTick = now;
+            if (skill.debug) mgr.debug(name + " ломает тело пилота " + pilotOf(b));
+            String owner = pilotOf(b);
+            if (owner != null) talk(p, BotChatter.Topic.TOXIC, 0.6, 20 * 30, owner);
+        } else if (now - bodyHitTick == 2) {
+            BotNms.attack(p, b);
+        }
+        return true;
+    }
+
     // =====================================================================  рыхлый снег
 
     private int snowDx, snowDz, snowDirUntil, snowUntil = -1, snowSurfaceY;
@@ -1363,7 +1608,9 @@ public final class Bot {
     private int escapeUntil = -1, escapePhaseStart, escapeBestTick;
     private boolean escapeJump;
     private double escapeBest, escapeStartY;
-    private Location escapeTo;
+    private Location escapeTo, escapeGoal;
+    private boolean escapeBelow;
+    private int belowBanUntil;
 
     private void recordCrumb(Player p, int now) {
         if (now < nextCrumb || !BotNms.onGround(p) || p.isInsideVehicle()) return;
@@ -1383,13 +1630,16 @@ public final class Bot {
      */
     private void checkTrapped(Player p, int now) {
         if (now < escapeUntil) return;
+        if (pitMode) { trapAnchor = null; return; }
         Location l = p.getLocation();
-        if (trapAnchor == null || !trapAnchor.getWorld().equals(l.getWorld()) || trapAnchor.distanceSquared(l) > 14 * 14) {
+        // Спуск (лестница в доме тоже крутится на пятачке) ловушкой не считаем.
+        if (trapAnchor == null || !trapAnchor.getWorld().equals(l.getWorld()) || trapAnchor.distanceSquared(l) > 14 * 14
+                || l.getY() < trapAnchor.getY() - 2.5) {
             trapAnchor = l.clone();
             trapSince = now;
             return;
         }
-        if (now - trapSince < 20 * 25) return;
+        if (now - trapSince < 20 * 6) return;
         switch (goal) {
             case FIGHT: case DODGE: case EVADE: case HEAL: case DROP: case HOLD: case NUKE: case CAVE:
             case WARDEN: case AVOID_WARDEN: case SHARE: case AIRPIG:
@@ -1397,18 +1647,32 @@ public final class Bot {
             default:
         }
         Location g = nav.getGoal();
-        if (g == null || !g.getWorld().equals(l.getWorld()) || g.distanceSquared(trapAnchor) < 16 * 16) return;
+        if (g == null || !g.getWorld().equals(l.getWorld())) return;
         if (rides.active() || p.isInsideVehicle() || !BotNms.onGround(p)) return;
+        // Цель почти под нами (союзник в доме, а мы на крыше), пути вниз нет: спрыгиваем, не ждём.
+        boolean below = now >= belowBanUntil && g.getY() < l.getY() - 3.5
+            && Math.hypot(g.getX() - l.getX(), g.getZ() - l.getZ()) < 24 && !(nav.hasPath() && nav.reaches());
+        if (!below && (now - trapSince < 20 * 25 || g.distanceSquared(trapAnchor) < 16 * 16)) return;
         trapSince = now;
         escapeUntil = now + 20 * 30;
-        escapeJump = crumbs.size() < 3;
+        escapeBelow = below;
+        escapeGoal = g.clone();
+        if (below) belowBanUntil = now + 20 * 40;
+        escapeJump = below || crumbs.size() < 3;
         escapePhaseStart = now;
         escapeBestTick = now;
         escapeBest = Double.MAX_VALUE;
         escapeStartY = l.getY();
         escapeTo = null;
         nav.clear();
-        if (skill.debug) mgr.debug(name + " застрял, выхожу " + (escapeJump ? "прыжком" : "назад по своим следам"));
+        if (skill.debug) mgr.debug(name + " застрял" + (below ? " (цель внизу)" : "") + ", выхожу "
+            + (escapeJump ? "прыжком" : "назад по своим следам"));
+    }
+
+    /** Среди следов есть точки заметно ниже: сюда поднялись снизу. */
+    private boolean cameFromBelow(Location l) {
+        for (Location c : crumbs) if (c.getWorld().equals(l.getWorld()) && c.getY() < l.getY() - 2.5) return true;
+        return false;
     }
 
     private void finishEscape() {
@@ -1435,6 +1699,7 @@ public final class Bot {
                 escapeBestTick = now;
             }
             if (trapAnchor != null && l.distanceSquared(trapAnchor) > 16 * 16) { finishEscape(); return false; } // выбрались
+            if (BotNms.onGround(p) && l.getY() < escapeStartY - 3.5) { finishEscape(); return false; } // спустились
             double d = l.distance(escapeTo);
             if (d < escapeBest - 0.3) { escapeBest = d; escapeBestTick = now; }
             if (now - escapeBestTick > 20 * 6) { escapeJump = true; escapePhaseStart = now; escapeTo = null; return false; }
@@ -1450,11 +1715,24 @@ public final class Bot {
         // Прыжок: к краю, где упасть безопаснее всего, и шаг вниз (без спринта - не прыжок вдаль).
         if (now - escapePhaseStart > 20 * 12) { finishEscape(); return false; }
         if (escapeTo == null) {
-            escapeTo = bestDropEdge(p);
-            if (escapeTo == null) { finishEscape(); return false; }
+            escapeTo = bestDropEdge(p, escapeBelow ? escapeGoal : null);
+            if (escapeTo == null) {
+                // Прыгать к цели некуда. Забрались сюда снизу - спускаемся тем же путём.
+                if (escapeBelow && cameFromBelow(l)) {
+                    escapeBelow = false;
+                    escapeJump = false;
+                    escapePhaseStart = now;
+                    escapeBest = Double.MAX_VALUE;
+                    escapeBestTick = now;
+                    return false;
+                }
+                finishEscape();
+                return false;
+            }
             if (skill.debug) mgr.debug(name + " спрыгивает у " + escapeTo.getBlockX() + "," + escapeTo.getBlockY() + "," + escapeTo.getBlockZ());
         }
-        if (BotNms.onGround(p) && l.getY() < escapeStartY - 2.5) { finishEscape(); return false; } // внизу
+        boolean down = escapeBelow ? l.getY() <= escapeTo.getY() + 1.2 : l.getY() < escapeStartY - 2.5;
+        if ((BotNms.onGround(p) || p.isInWater()) && down) { finishEscape(); return false; } // внизу
         double dx = escapeTo.getX() - l.getX(), dz = escapeTo.getZ() - l.getZ();
         motor.turn(p, Motor.yawTo(dx, dz), 35f, Math.min(skill.turnSpeed, 20f));
         // бортик в блок по краю крыши перепрыгиваем
@@ -1468,15 +1746,18 @@ public final class Bot {
      * снег - лучше всего, иначе самая малая высота. Лаву, огонь, кактусы и бездну не берём,
      * смертельный прыжок тоже.
      */
-    private Location bestDropEdge(Player p) {
+    private Location bestDropEdge(Player p, Location toward) {
         Location l = p.getLocation();
         World w = p.getWorld();
         int fy = l.getBlockY();
+        // К цели внизу (союзник под крышей): прыгаем там, где опустимся до её высоты, поближе
+        // к ней и так, чтобы осталось хотя бы 8 хп.
+        boolean below = toward != null;
         Location best = null;
         double bestCost = Double.MAX_VALUE;
         for (int a = 0; a < 16; a++) {
             double ang = a * Math.PI / 8, ux = -Math.sin(ang), uz = Math.cos(ang);
-            for (int r = 1; r <= 8; r++) {
+            for (int r = 1; r <= (below ? 12 : 8); r++) {
                 int x = (int) Math.floor(l.getX() + ux * r), z = (int) Math.floor(l.getZ() + uz * r);
                 Block feet = w.getBlockAt(x, fy, z);
                 Block head = feet.getRelative(org.bukkit.block.BlockFace.UP);
@@ -1486,15 +1767,22 @@ public final class Bot {
                 if (!feet.isPassable() || !head.isPassable()) break; // стена
                 if (!feet.getRelative(org.bukkit.block.BlockFace.DOWN).isPassable()) continue; // ещё пол
                 // Край. Шагнув с него, пролетаем ещё блок-два вперёд: смотрим и туда.
+                boolean found = false;
                 for (int k = 0; k <= 2; k++) {
                     int lx = (int) Math.floor(l.getX() + ux * (r + k)), lz = (int) Math.floor(l.getZ() + uz * (r + k));
                     if (k > 0 && !(w.getBlockAt(lx, fy, lz).isPassable() && w.getBlockAt(lx, fy + 1, lz).isPassable())) break;
                     double dmg = landingDamage(w, lx, fy, lz);
                     if (dmg < 0 || dmg >= p.getHealth() - 1) continue; // лава, бездна, разобьёмся
+                    if (below && dmg > Math.max(4, p.getHealth() - 8)) continue;
+                    double ly = landingY(w, lx, fy, lz);
+                    // Скат крыши, ступенька: так вниз к цели не спуститься, край ищем дальше по лучу.
+                    if (below && ly > toward.getY() + 2) continue;
                     double cost = dmg * 10 + r + k;
-                    if (cost < bestCost) { bestCost = cost; best = new Location(w, lx + 0.5, fy, lz + 0.5); }
+                    if (below) cost += Math.hypot(lx + 0.5 - toward.getX(), lz + 0.5 - toward.getZ()) * 0.7;
+                    found = true;
+                    if (cost < bestCost) { bestCost = cost; best = new Location(w, lx + 0.5, ly, lz + 0.5); }
                 }
-                break; // край на этом луче найден
+                if (found || !below) break; // край на этом луче найден
             }
         }
         return best;
@@ -1516,6 +1804,16 @@ public final class Bot {
         return -1; // бездна
     }
 
+    /** Высота ног после падения в столбец (x,z) с высоты fy (в воде и снегу - их уровень). */
+    private static double landingY(World w, int x, int fy, int z) {
+        for (int dy = 1; dy <= 40; dy++) {
+            Block b = w.getBlockAt(x, fy - dy, z);
+            if (b.getType() == Material.WATER || b.getType() == Material.POWDER_SNOW) return fy - dy;
+            if (!b.isPassable()) return fy - dy + 1;
+        }
+        return fy - 40;
+    }
+
     // =====================================================================  бой
 
     private enum Weapon { GUN, AUTO, SHOTGUN, LAUNCHER, BOW, CROSSBOW, SPRAYER, THROW, CUSTOM, MELEE }
@@ -1527,6 +1825,9 @@ public final class Bot {
         Location loc = p.getLocation();
         double d = e.getLocation().distance(loc);
         boolean visible = t.visible;
+
+        // Школьный токсик в общий чат, пока деремся с игроком (или ботом).
+        if (visible && e instanceof Player && d < 45) talk(p, BotChatter.Topic.TOXIC, 0.4, 20 * 20, e.getName());
 
         if (kamikazeReady(p, now) && kamikazeStep(p, now, e, d)) return;
 
@@ -2343,11 +2644,13 @@ public final class Bot {
             tunnelPos = l.clone();
             tunnelPosTick = now;
             tunnelStuck = 0;
+        } else if (builder.isMining()) {
+            tunnelPosTick = now; // ломаем блок - это не застревание
         } else if (now - tunnelPosTick > 40 && minedBlock == null) {
             tunnelPosTick = now;
             if (++tunnelStuck >= 3) { rotateCaveDir(now); tunnelStuck = 0; }
         }
-        if (tunnelStuck >= 1 && vert > 0) vert = 0;
+        if (tunnelStuck >= 1 && vert > 0 && !pitKeepUp) vert = 0;
         java.util.List<Block> need = new java.util.ArrayList<Block>();
         if (vert > 0) need.add(w.getBlockAt(x, y + 2, z));
         if (vert >= 0) {
@@ -2606,7 +2909,7 @@ public final class Bot {
     private void tauntOnAttack(Player p, LivingEntity e) {
         if (!(e instanceof Player) || e.getUniqueId().equals(tauntedId)) return;
         tauntedId = e.getUniqueId();
-        talk(p, BotChatter.Topic.SEE_ENEMY, 0.12, 20 * 45, e.getName());
+        talk(p, BotChatter.Topic.SEE_ENEMY, 0.35, 20 * 30, e.getName());
     }
 
     /** ПВО MilitaryCraft рядом, которая видит бота (её мы и слышим). */
