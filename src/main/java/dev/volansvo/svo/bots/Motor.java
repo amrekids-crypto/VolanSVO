@@ -44,13 +44,11 @@ public final class Motor {
      */
     public void drive(Player p, double dx, double dz, double speed, float strafe, boolean jump, boolean wantSprint) {
         double len = Math.sqrt(dx * dx + dz * dz);
-        // Забор, стена, калитка выше прыжка: прыгать в них бесполезно (так бот и скакал у забора).
-        if (jump && len > 1e-4 && jumpUseless(p, dx / len, dz / len)) jump = false;
+        double yr = Math.toRadians(yaw);
+        double sin = Math.sin(yr), cos = Math.cos(yr);
         float fwd = 0f, side = 0f;
         if (len > 1e-4 && speed > 0) {
             double nx = dx / len, nz = dz / len;
-            double yr = Math.toRadians(yaw);
-            double sin = Math.sin(yr), cos = Math.cos(yr);
             fwd = (float) ((-nx * sin + nz * cos) * speed);
             side = (float) ((nx * cos + nz * sin) * speed);
         }
@@ -58,6 +56,13 @@ public final class Motor {
         // Нормируем, чтобы по диагонали не бежать быстрее.
         float m = (float) Math.sqrt(fwd * fwd + side * side);
         if (m > 1f) { fwd /= m; side /= m; }
+        // Забор, стена, калитка выше прыжка: прыгать в них бесполезно (так бот и скакал у забора).
+        // Смотрим туда, куда реально идём (с шагом вбок), по всей ширине бота.
+        if (jump && (fwd != 0f || side != 0f)) {
+            double mx = fwd * -sin + side * cos, mz = fwd * cos + side * sin;
+            double ml = Math.sqrt(mx * mx + mz * mz);
+            if (ml > 1e-4 && blockedByTall(p, mx / ml, mz / ml)) jump = false;
+        }
         BotNms.input(p, fwd, side, jump);
         boolean sprint = wantSprint && fwd > 0.8f && p.getFoodLevel() > 6 && !p.isSneaking();
         BotNms.sprint(p, sprint);
@@ -70,6 +75,44 @@ public final class Motor {
     public static boolean jumpUseless(Player p, double nx, double nz) {
         org.bukkit.Location l = p.getLocation();
         return tallAt(l.getWorld(), (int) Math.floor(l.getX() + nx * 0.7), (int) Math.floor(l.getZ() + nz * 0.7), l.getY());
+    }
+
+    /**
+     * По ходу движения (по всей ширине бота, вплотную и чуть дальше) забор или стена выше
+     * прыжка, а ступеньки, на которую прыжок поможет забраться, нет.
+     */
+    public static boolean blockedByTall(Player p, double nx, double nz) {
+        org.bukkit.Location l = p.getLocation();
+        org.bukkit.World w = l.getWorld();
+        double feet = l.getY();
+        boolean tall = false, step = false;
+        for (double off : new double[]{-0.3, 0.0, 0.3}) {
+            for (double ahead : new double[]{0.45, 0.8}) {
+                int x = (int) Math.floor(l.getX() + nx * ahead - nz * off), z = (int) Math.floor(l.getZ() + nz * ahead + nx * off);
+                double h = obstacleTop(w, x, z, feet) - feet;
+                if (h > 1.2) tall = true;
+                else if (h > 0.05 && !obstacleTopTall(w, x, z, feet)) step = true;
+            }
+        }
+        return tall && !step;
+    }
+
+    /** Верх того, что стоит в клетке на уровне ног и головы (feet - пусто). */
+    private static double obstacleTop(org.bukkit.World w, int x, int z, double feet) {
+        int fy = (int) Math.floor(feet + 0.01);
+        double top = feet;
+        for (int dy = 0; dy <= 1; dy++) {
+            org.bukkit.block.Block b = w.getBlockAt(x, fy + dy, z);
+            if (b.isPassable()) continue;
+            for (org.bukkit.util.BoundingBox bb : b.getCollisionShape().getBoundingBoxes()) top = Math.max(top, b.getY() + bb.getMaxY());
+        }
+        return top;
+    }
+
+    /** На ступеньке нет места для головы (над ней сразу блок) - запрыгнуть не выйдет. */
+    private static boolean obstacleTopTall(org.bukkit.World w, int x, int z, double feet) {
+        int fy = (int) Math.floor(feet + 0.01);
+        return !w.getBlockAt(x, fy + 2, z).isPassable();
     }
 
     /** В клетке (x,z) на уровне ног feet стоит то, что прыжком не взять (забор, стена). */

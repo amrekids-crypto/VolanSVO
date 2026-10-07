@@ -138,7 +138,7 @@ public final class Bot {
     private String caveWhy = "";
     private boolean caveTowerOk = true;
     private int caveBestY, caveBestTick, lastTunnel = -1000, caveTowerRetry;
-    private int evadeStart, fightLockUntil, bumpTicks, slideUntil, slideDir;
+    private int evadeStart, fightLockUntil, bumpTicks, slideUntil, slideDir, fenceSeenUntil;
     private double evadeDist0;
     private int stillTick;
     private final Rides rides;
@@ -193,7 +193,7 @@ public final class Bot {
             Player bp = player();
             return bp != null && hold(bp, slot, mgr.now());
         }, skill.turnSpeed);
-        if (skill.debug) this.builder.debugLog = msg -> mgr.debug(name + " " + msg);
+        this.builder.debugLog = msg -> note(name + " " + msg);
         this.eikit = new EiKit(mgr, id, name, motor, slot -> {
             Player bp = player();
             return bp != null && hold(bp, slot, mgr.now());
@@ -1332,7 +1332,7 @@ public final class Bot {
         pitCheckAt = now + 10;
         if (pitMode) {
             if (now > pitUntil) {
-                if (skill.debug) mgr.debug(name + " не выбрался из ямы");
+                note(name + " не выбрался из ямы");
                 stopPit(p, now, 20 * 60);
             }
             return;
@@ -1359,7 +1359,7 @@ public final class Bot {
         pitTowerOk = true;
         pitTowerTo = Integer.MIN_VALUE;
         nav.clear();
-        if (skill.debug) mgr.debug(name + " в яме (стенка " + s[0] + "), выбираюсь " + (Builder.blockCount(p) >= s[0] ? "столбом" : "ступеньками"));
+        note(name + " в яме (стенка " + s[0] + "), выбираюсь " + (Builder.blockCount(p) >= s[0] ? "столбом" : "ступеньками"));
     }
 
     private void stopPit(Player p, int now, int ban) {
@@ -1389,7 +1389,7 @@ public final class Bot {
             pitTowerTo = Integer.MIN_VALUE;
         }
         if (now % 10 == 0 && BotNms.onGround(p) && pitShape(p) == null) {
-            if (skill.debug) mgr.debug(name + " выбрался из ямы");
+            note(name + " выбрался из ямы");
             stopPit(p, now, 20 * 10);
             return false;
         }
@@ -1489,7 +1489,7 @@ public final class Bot {
         if (now - bodyHitTick > 12) {
             BotNms.attack(p, b);
             bodyHitTick = now;
-            if (skill.debug) mgr.debug(name + " ломает тело пилота " + pilotOf(b));
+            note(name + " ломает тело пилота " + pilotOf(b));
             String owner = pilotOf(b);
             if (owner != null) talk(p, BotChatter.Topic.TOXIC, 0.12, 20 * 45, owner);
         } else if (now - bodyHitTick == 2) {
@@ -1559,7 +1559,7 @@ public final class Bot {
         losFailUntil = now + 20 * 15;
         ignoreUntil.put(e.getUniqueId(), now + 20 * 15);
         if (target != null && target.entity == e) target = null;
-        if (skill.debug) mgr.debug(name + " не видит " + e.getName() + " рядом и не пробиться, бросаю");
+        note(name + " не видит " + e.getName() + " рядом и не пробиться, бросаю");
         return false;
     }
 
@@ -1594,7 +1594,7 @@ public final class Bot {
         // Рядом закрытая дверь или калитка (путь через калитку навигатор не строит) - открываем и ищем путь заново.
         if (openNearbyPassages(p) > 0) {
             nav.clear();
-            if (skill.debug) mgr.debug(name + " стоит на месте (" + goal + "), открыл дверь/калитку");
+            note(name + " стоит на месте (" + goal + "), открыл дверь/калитку");
             return;
         }
         startLocalPath(p, now, "стоит на месте (" + goal + ")");
@@ -1820,7 +1820,7 @@ public final class Bot {
         climbUp = up;
         climbUntil = now + 20 * 45;
         nav.clear();
-        if (skill.debug) mgr.debug(name + " лезет " + (up ? "вверх" : "вниз") + " по " + w.getBlockAt(climbX, up ? climbBottom : climbTop, climbZ).getType()
+        note(name + " лезет " + (up ? "вверх" : "вниз") + " по " + w.getBlockAt(climbX, up ? climbBottom : climbTop, climbZ).getType()
             + " у " + climbX + "," + climbZ + " (" + climbBottom + ".." + climbTop + ")");
     }
 
@@ -2067,7 +2067,7 @@ public final class Bot {
             }
             snowSurfaceY = top;
             snowDirUntil = 0;
-            if (skill.debug) mgr.debug(name + " в рыхлом снегу, выбираюсь до y=" + snowSurfaceY);
+            note(name + " в рыхлом снегу, выбираюсь до y=" + snowSurfaceY);
         }
         if (!inPowderSnow(p) && BotNms.onGround(p) && l.getY() >= snowSurfaceY - 0.01) { snowUntil = -1; return false; }
         if (now >= snowDirUntil) {
@@ -2158,7 +2158,7 @@ public final class Bot {
             kamikazeUntil = now + 20 * 15;
             kamikazeTapAt = -1;
             mgr.shout(p, BotChatter.Topic.KAMIKAZE, e.getName());
-            if (skill.debug) mgr.debug(name + " камикадзе на " + e.getName());
+            note(name + " камикадзе на " + e.getName());
         }
         if (now > kamikazeUntil || e.isDead() || !isVest(inv.getChestplate())) { stopKamikaze(p, now); return false; }
         Location loc = p.getLocation();
@@ -2269,7 +2269,7 @@ public final class Bot {
             trapSince = now;
             platformChecks = 0;
             nav.clear();
-            if (skill.debug) mgr.debug(name + " застрял, открыл дверь/калитку");
+            note(name + " застрял, открыл дверь/калитку");
             return;
         }
         if (platform) {
@@ -2304,7 +2304,7 @@ public final class Bot {
         escapeDrop = null;
         fallPrepTried = false;
         nav.clear();
-        if (skill.debug) mgr.debug(name + " застрял" + (below ? " (цель внизу)" : platform ? " (летающая постройка)" : "")
+        note(name + " застрял" + (below ? " (цель внизу)" : platform ? " (летающая постройка)" : "")
             + ", выхожу " + (escapeJump ? "прыжком" : "назад по своим следам"));
     }
 
@@ -2397,7 +2397,7 @@ public final class Bot {
                 startLocalPath(p, now, "прыгать некуда");
                 return false;
             }
-            if (skill.debug) mgr.debug(name + " спрыгивает у " + escapeDrop.land.getBlockX() + "," + escapeDrop.land.getBlockY() + ","
+            note(name + " спрыгивает у " + escapeDrop.land.getBlockX() + "," + escapeDrop.land.getBlockY() + ","
                 + escapeDrop.land.getBlockZ() + " (урон " + escapeDrop.dmg + ", парашютов/зелий " + fallSaverCount(p) + ")");
         }
         Drop dr = escapeDrop;
@@ -2540,7 +2540,7 @@ public final class Bot {
         for (int i = 0; i < 36; i++) {
             if (!isParachute(inv.getItem(i))) continue;
             putChuteOffhand(p, i);
-            if (skill.debug) mgr.debug(name + " надел парашют");
+            note(name + " надел парашют");
             return false;
         }
         if (now < busyUntil) { motor.stop(p); return true; } // пьём
@@ -2553,7 +2553,7 @@ public final class Bot {
         BotNms.useItem(p, false);
         busyUntil = now + 40;
         fallPrepTried = true;
-        if (skill.debug) mgr.debug(name + " пьёт зелье медленного падения");
+        note(name + " пьёт зелье медленного падения");
         return true;
     }
 
@@ -2585,7 +2585,7 @@ public final class Bot {
         for (int i = 0; i < 36; i++) {
             if (!isParachute(inv.getItem(i))) continue;
             putChuteOffhand(p, i);
-            if (skill.debug) mgr.debug(name + " падает, раскрывает парашют");
+            note(name + " падает, раскрывает парашют");
             return;
         }
     }
@@ -2689,7 +2689,11 @@ public final class Bot {
 
         if (w == Weapon.MELEE) {
             double hl = Math.max(1e-6, Math.hypot(dx, dz));
-            boolean fence = d < 8 && Motor.tallBetween(p, e.getLocation()); // между нами забор или стена выше прыжка
+            // Между нами забор или стена выше прыжка. Пока идём к проходу, режим держим, иначе на
+            // границе дальности бот поворачивал назад и топтался на месте.
+            boolean fence = d < 24 && Motor.tallBetween(p, e.getLocation());
+            if (fence) fenceSeenUntil = now + 40;
+            else if (now < fenceSeenUntil) fence = true;
             if (d > 4.5 || fence) {
                 nav.setGoal(e.getLocation(), 1);
                 Navigator.Move m = nav.tick(p, now);
@@ -2812,7 +2816,7 @@ public final class Bot {
                 break;
             case THROW:
                 if (now >= nextThrow && aimedAtPoint(p, aim, 5f)) {
-                    if (skill.debug) mgr.debug(name + " бросает " + Items.warkitId(p.getInventory().getItemInMainHand()) + " в " + e.getName() + " d=" + (int) d);
+                    note(name + " бросает " + Items.warkitId(p.getInventory().getItemInMainHand()) + " в " + e.getName() + " d=" + (int) d);
                     BotNms.useItem(p, false);
                     nextThrow = now + 20 * (5 + rnd.nextInt(5));
                     nextInventory = now + 10;
@@ -3319,7 +3323,7 @@ public final class Bot {
             case LOOT: case PICKUP: case ROAM: case FOLLOW: case HUNT: case AIRDROP: case SHARE: case ZONE:
                 if (goal == Goal.FOLLOW && helpAlly != null && helpAlly.getWorld().equals(l.getWorld())
                         && helpAlly.getLocation().distance(l) < 7) break; // стоим рядом с союзником - так и надо
-                if (skill.debug) mgr.debug(name + " завис (" + goal + "), бросаю цель");
+                note(name + " завис (" + goal + "), бросаю цель");
                 towerTo = Integer.MIN_VALUE;
                 minedBlock = null;
                 abandonGoal(now);
@@ -3586,7 +3590,7 @@ public final class Bot {
         BotNms.attack(p, best);
         nextRocketHit = now + 4;
         talk(p, BotChatter.Topic.ROCKET_BLOCKED, 0.35, 20 * 60, null);
-        if (skill.debug) mgr.debug(name + " сбивает ракету " + best.getType());
+        note(name + " сбивает ракету " + best.getType());
         return true;
     }
 
@@ -4450,7 +4454,7 @@ public final class Bot {
         if (!hold(p, useFpv ? fpv : bomber, now)) return;
         nav.clear();
         motor.stop(p);
-        if (skill.debug) mgr.debug(name + " запускает " + (useFpv ? "FPV" : "Bombsender") + " на " + tgt.getName());
+        note(name + " запускает " + (useFpv ? "FPV" : "Bombsender") + " на " + tgt.getName());
         pilot.launch(p, useFpv, tgt, now);
         talk(p, BotChatter.Topic.PILOT, 0.3, 20 * 120, null);
     }
@@ -4649,7 +4653,7 @@ public final class Bot {
         BotNms.clickAir(p); // ЛКМ в воздух, даже если враг вплотную или над головой потолок
         eiReloadUntil = now + eiReloadTicks(t, mag);
         talk(p, BotChatter.Topic.T_RELOAD, 0.12, 20 * 45, null);
-        if (skill.debug) mgr.debug(name + " перезаряжает " + t);
+        note(name + " перезаряжает " + t);
         return true;
     }
 
@@ -4670,7 +4674,7 @@ public final class Bot {
         if (!hold(p, slot, now)) return;
         BotNms.useItem(p, false);
         talk(p, BotChatter.Topic.DRONE, 0.3, 20 * 120, null);
-        if (skill.debug) mgr.debug(name + " запускает дрон, ближайший враг " + nearest.getName());
+        note(name + " запускает дрон, ближайший враг " + nearest.getName());
         nextDrone = now + 20 * 115;
         busyUntil = now + 6;
     }
@@ -5108,11 +5112,26 @@ public final class Bot {
         return null;
     }
 
+    /** Последние причины (застрял, бросил блок, лезет...) - для /asvobot why, пишутся всегда. */
+    private final java.util.ArrayDeque<String> notes = new java.util.ArrayDeque<String>();
+
+    void note(String msg) {
+        int now = mgr.now();
+        notes.addLast((now / 20) + "с: " + (msg.startsWith(name + " ") ? msg.substring(name.length() + 1) : msg));
+        while (notes.size() > 8) notes.removeFirst();
+        if (skill.debug) mgr.debug(msg);
+    }
+
+    java.util.List<String> notes() { return new java.util.ArrayList<String>(notes); }
+
     String debug() {
         Player p = player();
+        int now = mgr.now();
         String t = target == null ? "-" : target.entity.getName() + (target.visible ? "(v)" : "");
+        String modes = (now < escapeUntil ? " ловушка" : "") + (pitMode ? " яма" : "") + (now < climbUntil ? " лестница" : "")
+            + (now < wanderUntil ? " свой-путь" : "") + (platformChecks > 0 ? " постройка" + platformChecks : "") + (builder.isMining() ? " копает" : "");
         return name + " goal=" + goal + " target=" + t + " hp=" + (p == null ? 0 : (int) p.getHealth())
-            + " path=" + nav.hasPath() + " fails=" + nav.getFailures() + rides.state()
+            + " path=" + nav.hasPath() + " reach=" + nav.reaches() + " fails=" + nav.getFailures() + modes + rides.state()
             + (goal == Goal.CAVE ? " cave=" + caveDigging + "/" + caveDx + "," + caveDz + "/" + caveWhy : "")
             + (nav.getGoal() == null ? "" : " to=" + nav.getGoal().getBlockX() + "," + nav.getGoal().getBlockY() + "," + nav.getGoal().getBlockZ())
             + (p == null ? "" : " use=" + p.isHandRaised() + " busy=" + (busyUntil - mgr.now()) + " held=" + p.getInventory().getItemInMainHand().getType());

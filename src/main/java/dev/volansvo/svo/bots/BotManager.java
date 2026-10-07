@@ -258,6 +258,12 @@ public final class BotManager implements Listener {
         plugin.getLogger().info("[Боты] " + msg);
     }
 
+    /** История причин бота по нику (или null). */
+    public List<String> notesOf(String botName) {
+        for (Bot b : bots.values()) if (b.name.equalsIgnoreCase(botName)) return b.notes();
+        return null;
+    }
+
     public List<String> debugLines() {
         List<String> out = new ArrayList<String>();
         for (Bot b : bots.values()) out.add(b.debug());
