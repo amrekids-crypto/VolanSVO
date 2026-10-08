@@ -49,7 +49,7 @@ public final class Timing {
     /** Написать сообщение: подумать и набрать length знаков. */
     public int typing(int length) {
         double cps = 5.5 / tempo;
-        return Math.min(160, ticks(900, 250, 900) + (int) Math.round(length / cps * 20.0));
+        return Math.min(70, ticks(600, 150, 400) + (int) Math.round(length / cps * 20.0 * 0.6));
     }
 
     /** Уйти с сервера после выбывания: от нескольких секунд до минуты. */

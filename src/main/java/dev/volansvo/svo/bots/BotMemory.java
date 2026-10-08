@@ -49,6 +49,11 @@ public final class BotMemory {
         }
 
         /** Говорил ли недавно эту реплику; если нет - запоминает её. */
+        /** Эту реплику бот говорил в прошлых катках (не запоминает её заново). */
+        boolean saidBefore(String line) {
+            return said.contains(line.hashCode());
+        }
+
         boolean repeats(String line) {
             Integer h = line.hashCode();
             if (said.contains(h)) return true;

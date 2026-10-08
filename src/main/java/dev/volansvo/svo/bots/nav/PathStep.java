@@ -19,6 +19,8 @@ public final class PathStep {
     public static final byte SWIM = 8;
     /** Сломать блок под собой. */
     public static final byte DIG_DOWN = 9;
+    /** Шаг присев под низким потолком (верхняя плита над головой). */
+    public static final byte CROUCH = 10;
 
     public final int x, y, z;
     public final byte move;

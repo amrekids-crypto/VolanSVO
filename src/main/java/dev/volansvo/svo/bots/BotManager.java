@@ -413,6 +413,9 @@ public final class BotManager implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onDamageGuard(EntityDamageEvent e) {
         if (!e.isCancelled() || !(e.getEntity() instanceof Player)) return;
+        // Только удары и выстрелы: падение и прочее отменяют свои механики (защита от падения
+        // после крюка и ранца MilitaryCraft, парашют), их не возвращаем.
+        if (!(e instanceof EntityDamageByEntityEvent)) return;
         Player victim = (Player) e.getEntity();
         LivingEntity attacker = (e instanceof EntityDamageByEntityEvent) ? source(((EntityDamageByEntityEvent) e).getDamager()) : null;
         boolean victimBot = isBot(victim);
@@ -599,18 +602,27 @@ public final class BotManager implements Listener {
     private final java.util.Set<String> saidThisGame = new java.util.HashSet<String>();
 
     private String pick(BotChatter.Topic t) {
-        return pickFrom(BotChatter.LINES.get(t));
+        return pickFrom(BotChatter.LINES.get(t), null);
     }
 
-    /** Ещё не звучавшая в этой катке реплика из набора; всё сказано - null (лучше промолчать, чем повторяться). */
-    private String pickFrom(String[] lines) {
+    /**
+     * Ещё не звучавшая в этой катке реплика из набора; всё сказано - null (лучше промолчать,
+     * чем повторяться). who - чей это голос: из свежих он берёт то, что не говорил и в прошлых катках.
+     */
+    private String pickFrom(String[] lines, Bot who) {
         if (lines == null || lines.length == 0) return null;
         boolean noWarden = !wardenInGame();
         List<String> fresh = new ArrayList<String>();
         for (String l : lines) if (!saidThisGame.contains(l) && !(noWarden && mentionsWarden(l))) fresh.add(l);
         if (fresh.isEmpty()) return null;
+        if (who != null) {
+            List<String> unseen = new ArrayList<String>();
+            for (String l : fresh) if (!who.saidBefore(l)) unseen.add(l);
+            if (!unseen.isEmpty()) fresh = unseen;
+        }
         String l = fresh.get(rnd.nextInt(fresh.size()));
         saidThisGame.add(l);
+        if (who != null) who.repeats(l); // запомнить на следующие катки
         return l;
     }
 
@@ -627,9 +639,8 @@ public final class BotManager implements Listener {
     /** Реплика для этого бота: не та, что он недавно говорил, и в его манере письма. */
     private String line(Player p, BotChatter.Topic t) {
         Bot b = bots.get(p.getUniqueId());
-        String raw = pick(t);
+        String raw = pickFrom(BotChatter.LINES.get(t), b);
         if (raw == null || b == null) return raw;
-        if (b.repeats(raw)) { String alt = pick(t); if (alt != null) raw = alt; } // в прошлой катке это уже говорил
         if (!skill.chatStyle) return raw;
         String n = t.name();
         boolean sad = n.startsWith("DEATH") || t == BotChatter.Topic.T_LOW_HP || t == BotChatter.Topic.T_NO_ITEMS;
@@ -656,7 +667,7 @@ public final class BotManager implements Listener {
     /** Реплика для своих («держи», «понял»): видят только люди из команды бота. */
     void say(Player p, String[] lines, double chance) {
         if (!skill.chat || rnd.nextDouble() > chance) return;
-        String l = pickFrom(lines);
+        String l = pickFrom(lines, bots.get(p.getUniqueId()));
         if (l != null) teamMessage(p, l);
     }
 

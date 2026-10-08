@@ -25,6 +25,11 @@ public final class Cell {
     public static final byte HALF = 7;
     /** Забор, стекло-панель, решётка: не пройти и не встать. */
     public static final byte OBSTACLE = 8;
+    /**
+     * Верхняя плита, люк под потолком: занимает верх клетки. Стоять на ней можно, как на
+     * полном блоке, а под ней (в клетке головы) проходят только присев.
+     */
+    public static final byte LOW = 9;
 
     public static final byte KIND = 0x0F;
     /** Ходить по такому неудобно и странно: листва. */
@@ -47,6 +52,12 @@ public final class Cell {
         return k == AIR || k == WATER || k == DOOR || k == CLIMB || k == THIN || k == HALF;
     }
 
+    /** На этом можно стоять сверху. */
+    public static boolean floor(byte t) {
+        int k = t & KIND;
+        return k == SOLID || k == LOW;
+    }
+
     /** Можно ли стоять ногами в клетке (x,y,z). */
     public static boolean stand(BlockView v, int x, int y, int z) {
         byte f = v.type(x, y, z);
@@ -54,6 +65,11 @@ public final class Cell {
         int k = f & KIND;
         if (k == HALF) return bodyFree(v.type(x, y + 2, z));
         if (k == THIN || k == WATER || k == CLIMB) return true;
-        return (v.type(x, y - 1, z) & KIND) == SOLID;
+        return floor(v.type(x, y - 1, z));
+    }
+
+    /** Пройти присев: ноги в пустой клетке на полу, над ними верхняя плита (проход в полтора блока). */
+    public static boolean crouch(BlockView v, int x, int y, int z) {
+        return (v.type(x, y, z) & KIND) == AIR && (v.type(x, y + 1, z) & KIND) == LOW && floor(v.type(x, y - 1, z));
     }
 }

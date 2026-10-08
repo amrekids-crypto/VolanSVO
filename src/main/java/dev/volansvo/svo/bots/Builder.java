@@ -49,10 +49,18 @@ final class Builder {
 
     // ================================================================== ломание
 
-    /** Можно ли боту ломать этот блок (контейнеры, двери и неразрушимое не трогаем). */
+    /**
+     * Блок в зоне. За её границей, как в ванилле, блоки не ломают, не ставят и не открывают:
+     * это касается и ботов.
+     */
+    static boolean inZone(Block b) {
+        return b.getWorld().getWorldBorder().isInside(b.getLocation());
+    }
+
+    /** Можно ли боту ломать этот блок (контейнеры, двери, неразрушимое и всё за зоной не трогаем). */
     static boolean breakable(Block b) {
         Material m = b.getType();
-        if (m.isAir() || b.isLiquid()) return false;
+        if (m.isAir() || b.isLiquid() || !inZone(b)) return false;
         float h = m.getHardness();
         if (h < 0 || h > 30) return false;
         if (b.getState() instanceof Container) return false;
@@ -225,7 +233,7 @@ final class Builder {
 
     /** downOnly: только кликом по блоку снизу (столб под собой), на стены не смотрим. */
     boolean place(Player p, Block target, boolean downOnly) {
-        if (placeBlocked()) return false;
+        if (placeBlocked() || !inZone(target)) return false;
         if (!target.getType().isAir() && !target.isReplaceable() && !target.isLiquid()) return false;
         int slot = blockSlot(p);
         if (slot < 0 || !hold.test(slot)) return false;
@@ -233,7 +241,7 @@ final class Builder {
         for (BlockFace f : SUPPORT) {
             if (downOnly && f != BlockFace.DOWN) continue;
             Block n = target.getRelative(f);
-            if (!n.getType().isSolid()) continue;
+            if (!n.getType().isSolid() || !inZone(n)) continue;
             BlockFace clicked = f.getOppositeFace(); // грань соседа, смотрящая на target
             Location hit = n.getLocation().add(0.5 + clicked.getModX() * 0.5, 0.5 + clicked.getModY() * 0.5,
                 0.5 + clicked.getModZ() * 0.5);
@@ -279,6 +287,7 @@ final class Builder {
         Location l = p.getLocation();
         int feet = l.getBlockY();
         if (feet >= targetFeetY || blockCount(p) == 0 || placeBlocked()) { towerWhy = "end " + feet + "/" + targetFeetY + " b=" + blockCount(p) + " pb=" + placeBlocked(); towerFeetY = Integer.MIN_VALUE; return false; }
+        if (!inZone(p.getWorld().getBlockAt(l.getBlockX(), feet, l.getBlockZ()))) { towerWhy = "за зоной"; towerFeetY = Integer.MIN_VALUE; return false; }
         // Над головой должно быть место.
         Block head = p.getWorld().getBlockAt(l.getBlockX(), feet + 2, l.getBlockZ());
         if (head.getType().isSolid()) {

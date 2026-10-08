@@ -8,4 +8,7 @@ public interface BlockView {
 
     /** За сколько тиков бот сломает блок; -1 - не сломает или ломать нельзя. */
     int breakTicks(int x, int y, int z);
+
+    /** Сюда можно поставить блок (за границей зоны нельзя). */
+    default boolean canPlace(int x, int y, int z) { return true; }
 }

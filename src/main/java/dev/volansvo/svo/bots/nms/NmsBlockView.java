@@ -52,6 +52,8 @@ public final class NmsBlockView implements BlockView {
     private static float[] hardByState;
     /** Младшие 3 бита - каким инструментом копается (0 - любым), 8 - без инструмента не добыть. */
     private static byte[] toolByState;
+    /** Низ и верх коллизии состояния (доли блока); низ больше верха - коллизии нет; NaN - не считали. */
+    private static float[] collLo, collHi;
 
     /** Скорость инструмента по материалу: дерево, золото, камень, железо, алмаз, незерит. */
     private static final float[] TIER_SPEED = {2f, 12f, 4f, 6f, 8f, 9f};
@@ -63,6 +65,8 @@ public final class NmsBlockView implements BlockView {
     private final LongSet noBreak;
     private LevelChunk chunk;
     private int chunkX = Integer.MIN_VALUE, chunkZ;
+    /** Границы зоны на момент поиска (за ними блоки не ломают, не ставят и не открывают). */
+    private double zMinX, zMaxX, zMinZ, zMaxZ;
 
     /**
      * @param cached  запоминать клетки (для одного поиска; для слежения за живым миром - нет)
@@ -77,6 +81,7 @@ public final class NmsBlockView implements BlockView {
         if (cache != null) cache.defaultReturnValue(UNKNOWN);
         this.tools = tools;
         this.noBreak = noBreak;
+        snapZone();
         if (typeByState == null) {
             int n = Block.BLOCK_STATE_REGISTRY.size();
             byte[] types = new byte[n];
@@ -85,9 +90,15 @@ public final class NmsBlockView implements BlockView {
             java.util.Arrays.fill(hard, Float.NaN);
             toolByState = new byte[n];
             hardByState = hard;
+            float[] lo = new float[n], hi = new float[n];
+            java.util.Arrays.fill(lo, Float.NaN);
+            collHi = hi;
+            collLo = lo;
             typeByState = types;
         }
     }
+
+    public int minY() { return minY; }
 
     public boolean sameWorld(World world) {
         return ((CraftWorld) world).getHandle() == level;
@@ -97,6 +108,42 @@ public final class NmsBlockView implements BlockView {
     public void newTick() {
         chunk = null;
         chunkX = Integer.MIN_VALUE;
+        snapZone();
+    }
+
+    private void snapZone() {
+        net.minecraft.world.level.border.WorldBorder wb = level.getWorldBorder();
+        zMinX = wb.getMinX(); zMaxX = wb.getMaxX(); zMinZ = wb.getMinZ(); zMaxZ = wb.getMaxZ();
+    }
+
+    /** Блок в зоне. За её границей, как в ванилле, блоки не ломают, не ставят и не открывают. */
+    public boolean inZone(int x, int z) {
+        return x >= zMinX && x < zMaxX && z >= zMinZ && z < zMaxZ;
+    }
+
+    @Override
+    public boolean canPlace(int x, int y, int z) {
+        return inZone(x, z);
+    }
+
+    /**
+     * Коллизия блока (x,y,z) задевает высоты от y0 до y1 (мировые). Незагруженное - стена.
+     * Для просчёта полёта: ширину блока не уточняем, по высоте - точно (плиты, заборы).
+     */
+    public boolean collides(int x, int y, int z, double y0, double y1) {
+        if (y < minY || y > maxY) return false;
+        BlockState s = state(x, y, z);
+        if (s == null) return true;
+        int id = Block.getId(s);
+        float lo, hi;
+        if (id >= 0 && id < collLo.length && !Float.isNaN(collLo[id])) { lo = collLo[id]; hi = collHi[id]; }
+        else {
+            VoxelShape sh = s.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO);
+            if (sh.isEmpty()) { lo = 1f; hi = 0f; }
+            else { lo = (float) sh.min(Direction.Axis.Y); hi = (float) sh.max(Direction.Axis.Y); }
+            if (id >= 0 && id < collLo.length) { collHi[id] = hi; collLo[id] = lo; }
+        }
+        return lo <= hi && y0 < y + hi && y1 > y + lo;
     }
 
     @Override
@@ -118,6 +165,10 @@ public final class NmsBlockView implements BlockView {
         if (id < 0 || id >= typeByState.length) return classify(s);
         byte t = typeByState[id];
         if (t == UNKNOWN) typeByState[id] = t = classify(s);
+        // Закрытую дверь за зоной не открыть: это стена.
+        if ((t & Cell.KIND) == Cell.DOOR && !inZone(x, z)
+                && !(s.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.OPEN)
+                     && s.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OPEN))) return Cell.OBSTACLE;
         return t;
     }
 
@@ -157,6 +208,8 @@ public final class NmsBlockView implements BlockView {
         if (top <= 0.6) return (byte) (Cell.HALF | surface);
         boolean wide = shape.min(Direction.Axis.X) <= 0.07 && shape.max(Direction.Axis.X) >= 0.93
             && shape.min(Direction.Axis.Z) <= 0.07 && shape.max(Direction.Axis.Z) >= 0.93;
+        // Верхняя плита, люк наверху: снизу полблока пусто, под ними проходят присев.
+        if (wide && shape.min(Direction.Axis.Y) >= 0.49) return (byte) (Cell.LOW | surface);
         return wide ? (byte) (Cell.SOLID | falls | surface) : Cell.OBSTACLE;
     }
 
@@ -174,6 +227,7 @@ public final class NmsBlockView implements BlockView {
     @Override
     public int breakTicks(int x, int y, int z) {
         if (noBreak != null && noBreak.contains(Pos.pack(x, y, z))) return -1;
+        if (!inZone(x, z)) return -1;
         BlockState s = state(x, y, z);
         if (s == null) return -1;
         int id = Block.getId(s);

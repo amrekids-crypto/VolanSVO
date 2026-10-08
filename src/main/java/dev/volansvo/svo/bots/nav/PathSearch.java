@@ -50,6 +50,8 @@ public final class PathSearch {
     static final double LEDGE = 1.2;         // по краю обрыва
     static final double TURN = 0.35;         // смена направления
     static final double LADDER_UP = 8.5, LADDER_DOWN = 6.7;
+    /** Присев идут втрое медленнее. */
+    static final double CROUCH = 3.3;
     static final double SWIM_UP = 9, SWIM_DOWN = 5;
     private static final double[] FALL = fallTable(24);
 
@@ -152,11 +154,14 @@ public final class PathSearch {
         int x = n.x, y = n.y, z = n.z;
         byte feet = t(x, y, z);
         int fk = feet & Cell.KIND;
-        boolean headroom = Cell.bodyFree(t(x, y + 2, z));
+        // Над головой верхняя плита: стоим присев, отсюда только шаг в сторону или вниз.
+        boolean low = (t(x, y + 1, z) & Cell.KIND) == Cell.LOW;
+        boolean headroom = !low && Cell.bodyFree(t(x, y + 2, z));
         // Под ногами опора: настоящая или только что поставленный блок.
-        boolean firm = (t(x, y - 1, z) & Cell.KIND) == Cell.SOLID || n.move == PathStep.PILLAR || n.move == PathStep.BRIDGE;
+        boolean firm = Cell.floor(t(x, y - 1, z)) || n.move == PathStep.PILLAR || n.move == PathStep.BRIDGE;
 
-        for (int i = 0; i < 4; i++) cardinal(n, DX[i], DZ[i], fk, headroom, firm);
+        for (int i = 0; i < 4; i++) cardinal(n, DX[i], DZ[i], fk, headroom, firm, low);
+        if (low) return;
 
         for (int i = 0; i < 4; i++) {
             int nx = x + QX[i], nz = z + QZ[i];
@@ -179,7 +184,7 @@ public final class PathSearch {
             if ((down & Cell.KIND) == Cell.WATER) relax(n, x, y - 1, z, SWIM_DOWN, PathStep.SWIM, null, Pos.NONE);
         }
         if (fk == Cell.AIR && firm) {
-            if (n.placed < opt.blocks) {
+            if (n.placed < opt.blocks && view.canPlace(x, y, z)) {
                 if (headroom) {
                     relax(n, x, y + 1, z, PILLAR, PathStep.PILLAR, null, Pos.pack(x, y, z));
                 } else if (opt.dig) {
@@ -197,26 +202,30 @@ public final class PathSearch {
         }
     }
 
-    private void cardinal(Node n, int dx, int dz, int fk, boolean headroom, boolean firm) {
+    private void cardinal(Node n, int dx, int dz, int fk, boolean headroom, boolean firm, boolean low) {
         int x = n.x, y = n.y, z = n.z, nx = x + dx, nz = z + dz;
 
         if (stand(nx, y, nz)) {
             relax(n, nx, y, nz, enter(nx, y, nz), PathStep.WALK, null, Pos.NONE);
         } else {
             byte f = t(nx, y, nz);
+            // Низкий проход: присев (или сломать плиту, если это быстрее).
+            if (Cell.crouch(view, nx, y, nz)) relax(n, nx, y, nz, LAND * CROUCH, PathStep.CROUCH, null, Pos.NONE);
             if (Cell.bodyFree(f) && Cell.bodyFree(t(nx, y + 1, nz))) {
                 // Впереди пустота: спрыгнуть, перепрыгнуть или застелить.
                 fall(n, nx, nz);
                 if (opt.parkourGap > 0 && headroom && firm && (fk == Cell.AIR || fk == Cell.THIN)) parkour(n, dx, dz);
                 int fkN = f & Cell.KIND;
                 int below = t(nx, y - 1, nz) & Cell.KIND;
-                if (n.placed < opt.blocks && firm && fkN == Cell.AIR && (below == Cell.AIR || below == Cell.WATER)) {
+                if (n.placed < opt.blocks && firm && fkN == Cell.AIR && (below == Cell.AIR || below == Cell.WATER)
+                        && view.canPlace(nx, y - 1, nz)) {
                     relax(n, nx, y, nz, LAND + PLACE, PathStep.BRIDGE, null, Pos.pack(nx, y - 1, nz));
                 }
             } else if (opt.dig) {
                 dig(n, nx, y, nz, PathStep.WALK, LAND, false);
             }
         }
+        if (low) return; // присев не запрыгнуть
 
         if (stand(nx, y + 1, nz)) {
             if (headroom) {
@@ -280,7 +289,7 @@ public final class PathSearch {
      * клеткой есть пол. needHead - сначала убрать блок над собой (для прыжка).
      */
     private void dig(Node n, int nx, int ty, int nz, byte move, double base, boolean needHead) {
-        if ((t(nx, ty - 1, nz) & Cell.KIND) != Cell.SOLID) return;
+        if (!Cell.floor(t(nx, ty - 1, nz))) return;
         long[] br = new long[3];
         int cnt = 0;
         double cost = base;

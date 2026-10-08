@@ -101,6 +101,8 @@ public final class Navigator {
         public Block place;
         /** На какую высоту ног подняться столбом под собой (MIN_VALUE - не строить). */
         public int pillarTo = Integer.MIN_VALUE;
+        /** Впереди или здесь низкий проход: идём присев. */
+        public boolean crouch;
     }
 
     private final BotSkill skill;
@@ -134,6 +136,8 @@ public final class Navigator {
     private int failures = 0;
     /** Путь может уходить за границу зоны (бот как раз уходит от неё). */
     public boolean allowOutsideZone;
+    /** Финал: к центру любой ценой, путь смелее ломает и ставит блоки. */
+    public boolean eager;
     private int unstuckTicks = 0;
     private float unstuckStrafe = 0f;
 
@@ -155,6 +159,8 @@ public final class Navigator {
     public boolean hasPath() { return steps != null && idx < steps.size(); }
     /** Текущий путь доходит до цели (а не обрывается в ближайшей к ней точке). */
     public boolean reaches() { return steps != null && reaches; }
+    /** Сколько узлов пути осталось пройти (-1 - пути нет). */
+    public int remaining() { return steps == null ? -1 : steps.size() - idx; }
     /** Сколько раз подряд не удалось дойти до текущей цели. */
     public int getFailures() { return failures; }
     /** Сколько тиков подряд бот не приближается к узлу пути. */
@@ -256,14 +262,19 @@ public final class Navigator {
         Move m = move;
         m.active = false; m.jump = false; m.sprintOk = false; m.sprintMust = false; m.strafeBias = 0f;
         m.dx = 0; m.dz = 0; m.lookX = 0; m.lookZ = 0; m.lookPitch = 0f;
-        m.planned = false; m.mine = null; m.place = null; m.pillarTo = Integer.MIN_VALUE;
+        m.planned = false; m.mine = null; m.place = null; m.pillarTo = Integer.MIN_VALUE; m.crouch = false;
         if (goal == null) return m;
         Location pos = p.getLocation();
         if (!pos.getWorld().equals(goal.getWorld())) return m;
 
         sinceRepath++;
-        // Уже на месте: стоим, это не застревание.
-        if (arrived(p, Math.max(0.8, accuracy + 0.3))) {
+        // Уже на месте: стоим, это не застревание. Но пока путь ведёт вверх (лестница под
+        // целью на крыше), не на месте: иначе бот у верха отпускал прыжок и сползал.
+        boolean stillUp = false;
+        if (hasPath() && goal.getY() > pos.getY() + 1.0) {
+            for (int i = idx; i < steps.size() && !stillUp; i++) stillUp = steps.get(i).y > pos.getY() + 0.6;
+        }
+        if (!stillUp && arrived(p, Math.max(0.8, accuracy + 0.3))) {
             stuckTicks = 0;
             failures = 0;
             bestDist = Double.MAX_VALUE;
@@ -292,7 +303,8 @@ public final class Navigator {
                 s = steps.get(idx);
                 if (smart) {
                     // Мир изменился (взрыв, чужая стройка): клетка пути больше не годится.
-                    if (!s.works() && s.move != PathStep.PARKOUR && !Cell.stand(live, s.x, s.y, s.z)) {
+                    if (!s.works() && s.move != PathStep.PARKOUR && !Cell.stand(live, s.x, s.y, s.z)
+                            && !(s.move == PathStep.CROUCH && Cell.crouch(live, s.x, s.y, s.z))) {
                         steps = null;
                         return m;
                     }
@@ -356,6 +368,14 @@ public final class Navigator {
         boolean onLadder = Cell.kind(live.type(pos.getBlockX(), (int) Math.floor(pos.getY() + 0.2), pos.getBlockZ())) == Cell.CLIMB;
         if (!inWater && onLadder && (nodeY > pos.getY() + 0.3 || s != null && s.move == PathStep.CLIMB && s.y >= pos.getY() - 0.2)) m.jump = true;
 
+        // Низкий проход здесь или в паре шагов: приседаем заранее, иначе упрёмся головой (и прыгнем).
+        if (smart && steps != null && idx < steps.size()) {
+            for (int i = Math.max(0, idx - 1); i < Math.min(steps.size(), idx + 2) && !m.crouch; i++) {
+                PathStep c = steps.get(i);
+                if (c.move == PathStep.CROUCH && sq(c.x + 0.5 - pos.getX()) + sq(c.z + 0.5 - pos.getZ()) < 2.2 * 2.2) m.crouch = true;
+            }
+            if (m.crouch) m.jump = false;
+        }
         boolean drop = s != null && s.move == PathStep.DESCEND && pos.getY() - s.y > 1.5;
         m.sprintOk = !inWater && !drop && (run || isStraight());
 
@@ -421,9 +441,9 @@ public final class Navigator {
             if (Cell.stand(view, sx, y, sz)) sy = y;
         }
         PathSearch.Options o = new PathSearch.Options();
-        o.dig = modify && skill.navDig;
-        o.blocks = modify && skill.navPlace && tick >= noPlaceUntil && !placeBlocked.getAsBoolean()
-            ? Math.min(10, Math.max(0, Builder.blockCount(p) - 4)) : 0;
+        o.dig = (modify || eager) && skill.navDig;
+        o.blocks = (modify || eager) && skill.navPlace && tick >= noPlaceUntil && !placeBlocked.getAsBoolean()
+            ? Math.min(eager ? 24 : 10, Math.max(0, Builder.blockCount(p) - (eager ? 2 : 4))) : 0;
         o.parkourGap = skill.navParkour && tick >= noParkourUntil ? (modify ? 2 : 1) : 0;
         search = new PathSearch(view, field(w, pos), new NavGoal.Near(goal.getBlockX(), goal.getBlockY(), goal.getBlockZ(), accuracy),
             o, sx, sy, sz);
@@ -755,7 +775,7 @@ public final class Navigator {
         for (int dy = 0; dy <= 1; dy++) {
             Block b = w.getBlockAt(s.x, s.y + dy, s.z);
             BlockData data = b.getBlockData();
-            if (!(data instanceof Openable)) continue;
+            if (!(data instanceof Openable) || !Builder.inZone(b)) continue; // за зоной не открыть
             String type = b.getType().name();
             if (type.startsWith("IRON_")) continue; // железные руками не открыть
             if (!type.endsWith("_DOOR") && !type.endsWith("_FENCE_GATE") && !(dy == 1 && type.endsWith("_TRAPDOOR"))) continue;
@@ -771,7 +791,9 @@ public final class Navigator {
     }
 
     String debug() {
-        return (steps == null ? " nav=-" : (smart ? " nav=own" : " nav=mob") + " " + idx + "/" + steps.size())
+        String at = "";
+        if (steps != null && idx < steps.size()) { PathStep c = steps.get(idx); at = "@" + c.x + "," + c.y + "," + c.z + ":" + c.move; }
+        return (steps == null ? " nav=-" : (smart ? " nav=own" : " nav=mob") + " " + idx + "/" + steps.size() + at)
             + (search != null ? " search=" + search.expanded() : "");
     }
 
