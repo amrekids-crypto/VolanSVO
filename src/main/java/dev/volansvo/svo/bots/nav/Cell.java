@@ -37,6 +37,8 @@ public final class Cell {
     /** Дорожка, брусчатка, доски: по такому ходят охотнее. */
     public static final byte ROAD = 0x20;
     public static final byte FALLS = 0x40;
+    /** Препятствие в полный блок высотой (решётка, стеклянная панель, наковальня): сверху на нём стоят. */
+    public static final byte TOP = (byte) 0x80;
 
     public static int kind(byte t) { return t & KIND; }
 
@@ -55,7 +57,7 @@ public final class Cell {
     /** На этом можно стоять сверху. */
     public static boolean floor(byte t) {
         int k = t & KIND;
-        return k == SOLID || k == LOW;
+        return k == SOLID || k == LOW || k == OBSTACLE && (t & TOP) != 0;
     }
 
     /** Можно ли стоять ногами в клетке (x,y,z). */

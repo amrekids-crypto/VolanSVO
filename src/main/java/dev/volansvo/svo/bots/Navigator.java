@@ -138,6 +138,8 @@ public final class Navigator {
     public boolean allowOutsideZone;
     /** Финал: к центру любой ценой, путь смелее ломает и ставит блоки. */
     public boolean eager;
+    /** Открыть дверь или калитку на пути (руками бота, ПКМ). */
+    java.util.function.Predicate<Block> opener;
     private int unstuckTicks = 0;
     private float unstuckStrafe = 0f;
 
@@ -251,11 +253,16 @@ public final class Navigator {
 
     /** Цель достигнута (по горизонтали в пределах dist, по высоте до 2.5 блоков). */
     public boolean arrived(Player p, double dist) {
+        return arrived(p, dist, 2.5);
+    }
+
+    /** Цель достигнута: по горизонтали в пределах dist, по высоте меньше dyMax. */
+    public boolean arrived(Player p, double dist, double dyMax) {
         if (goal == null) return true;
         Location l = p.getLocation();
         if (!l.getWorld().equals(goal.getWorld())) return false;
         double dx = l.getX() - goal.getX(), dz = l.getZ() - goal.getZ();
-        return dx * dx + dz * dz <= dist * dist && Math.abs(l.getY() - goal.getY()) < 2.5;
+        return dx * dx + dz * dz <= dist * dist && Math.abs(l.getY() - goal.getY()) < dyMax;
     }
 
     public Move tick(Player p, int serverTick) {
@@ -274,7 +281,9 @@ public final class Navigator {
         if (hasPath() && goal.getY() > pos.getY() + 1.0) {
             for (int i = idx; i < steps.size() && !stillUp; i++) stillUp = steps.get(i).y > pos.getY() + 0.6;
         }
-        if (!stillUp && arrived(p, Math.max(0.8, accuracy + 0.3))) {
+        // По высоте «дошёл», как и поиск пути: на блок (для широкой цели - на два). Раньше бот
+        // останавливался в 2.5 блока под вещью или врагом на уступе и стоял, считая, что пришёл.
+        if (!stillUp && arrived(p, Math.max(0.8, accuracy + 0.3), accuracy >= 3 ? 2.5 : 1.3)) {
             stuckTicks = 0;
             failures = 0;
             bestDist = Double.MAX_VALUE;
@@ -781,11 +790,7 @@ public final class Navigator {
             if (!type.endsWith("_DOOR") && !type.endsWith("_FENCE_GATE") && !(dy == 1 && type.endsWith("_TRAPDOOR"))) continue;
             Openable o = (Openable) data;
             if (o.isOpen()) continue;
-            o.setOpen(true);
-            b.setBlockData(o, true);
-            p.swingMainHand();
-            w.playSound(b.getLocation(), type.endsWith("_GATE") ? Sound.BLOCK_FENCE_GATE_OPEN
-                : Sound.BLOCK_WOODEN_DOOR_OPEN, 1f, 1f);
+            if (opener != null) opener.test(b);
             return;
         }
     }

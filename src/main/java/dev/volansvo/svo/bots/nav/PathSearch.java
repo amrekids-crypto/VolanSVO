@@ -281,7 +281,8 @@ public final class PathSearch {
             if (kind == Cell.WATER) return 0;
             if (!Cell.bodyFree(c)) return k > 4 ? 15 : 0;
         }
-        return 30;
+        // Под ямой пропасть: промах - смерть. Такой прыжок только если обход совсем далёк.
+        return 150;
     }
 
     /**

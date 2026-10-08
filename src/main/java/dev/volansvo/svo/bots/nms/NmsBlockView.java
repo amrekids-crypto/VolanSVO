@@ -210,7 +210,9 @@ public final class NmsBlockView implements BlockView {
             && shape.min(Direction.Axis.Z) <= 0.07 && shape.max(Direction.Axis.Z) >= 0.93;
         // Верхняя плита, люк наверху: снизу полблока пусто, под ними проходят присев.
         if (wide && shape.min(Direction.Axis.Y) >= 0.49) return (byte) (Cell.LOW | surface);
-        return wide ? (byte) (Cell.SOLID | falls | surface) : Cell.OBSTACLE;
+        if (wide) return (byte) (Cell.SOLID | falls | surface);
+        // Решётка, стеклянная панель, наковальня: пройти нельзя, но сверху стоят (пол-сетка).
+        return top >= 0.9 ? (byte) (Cell.OBSTACLE | Cell.TOP) : Cell.OBSTACLE;
     }
 
     private static final String[] ROADS = {"PATH", "PLANKS", "BRICK", "COBBLE", "SMOOTH_STONE", "POLISHED", "TERRACOTTA"};

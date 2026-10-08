@@ -227,6 +227,7 @@ public final class Bot {
     private int wardenAngryUntil;
     private int wardenRetryAt;
     private Location airdropPoint;
+    private int airdropBanUntil;
     private int pickupSince;
     private boolean grabbing;       // в бою побежали за оружием/сундуком
     private final Set<UUID> badPickups = new HashSet<UUID>();
@@ -247,6 +248,7 @@ public final class Bot {
         }, this.skill.turnSpeed);
         this.builder.debugLog = msg -> note(name + " " + msg);
         this.nav = new Navigator(this.skill, builder::placeBlocked);
+        this.nav.opener = b -> { Player bp = player(); return bp != null && clickOpen(bp, b, mgr.now()); };
         this.timing = new Timing(rnd, this.skill.tempo, this.skill.lapse);
         this.memory = mgr.memory().of(name);
         this.memory.matches++;
@@ -960,8 +962,10 @@ public final class Bot {
             double flat = Math.hypot(pl.getX() - p.getLocation().getX(), pl.getZ() - p.getLocation().getZ());
             double pd = pl.distance(p.getLocation());
             if (airpigWeapon(p, pd) != null && p.hasLineOfSight(pig)) return Goal.AIRPIG;
-            if (flat < 220 && insideBorder(p.getWorld(), pl.getX(), pl.getZ(), 6) && !nearWarden(pl.getX(), pl.getZ(), 26)) {
-                airdropPoint = new Location(p.getWorld(), pl.getX(), surfaceY(p.getWorld(), pl.getBlockX(), pl.getBlockZ(), p.getLocation().getBlockY()), pl.getZ());
+            if (flat < 220 && insideBorder(p.getWorld(), pl.getX(), pl.getZ(), 6) && !nearWarden(pl.getX(), pl.getZ(), 26)
+                    && now >= airdropBanUntil) {
+                // Ждём под шаром на земле, на своей высоте (не на крыше или кроне над нами).
+                airdropPoint = new Location(p.getWorld(), pl.getX(), nearY(p.getWorld(), pl.getBlockX(), pl.getBlockZ(), p.getLocation().getBlockY()), pl.getZ());
                 chest = null;
                 return Goal.AIRDROP;
             }
@@ -1151,7 +1155,7 @@ public final class Bot {
             case PICK_NUKE: case PICKUP: {
                 if (pickup == null || !pickup.isValid()) { pickup = null; break; }
                 // Предмет не достать (на дереве, в лаве, за стеной) - бросаем его.
-                if (goal == Goal.PICKUP && (now - pickupSince > 20 * (grabbing ? 6 : 12) || nav.getFailures() >= 3)) {
+                if (goal == Goal.PICKUP && (now - pickupSince > 20 * (grabbing ? 5 : 8) || nav.getFailures() >= 2)) {
                     badPickups.add(pickup.getUniqueId());
                     pickup = null;
                     nav.clear();
@@ -1321,6 +1325,11 @@ public final class Bot {
                     // Аирдроп ещё в воздухе - ждём под ним.
                     nav.setGoal(airdropPoint, 4);
                     m = nav.tick(p, now);
+                    // Под точку падения не пройти - этот аирдроп пропускаем.
+                    if (nav.getFailures() >= 3) { airdropBanUntil = now + 20 * 60; airdropPoint = null; nav.clear(); note(name + " не дойти до аирдропа, бросаю"); }
+                    // Ждём на месте - смотрим, где шар (как игрок, задрав голову).
+                    ArmorStand pig = hooks.airpig(now);
+                    if (pig != null && pig.getWorld().equals(loc.getWorld()) && nav.arrived(p, 5)) lookAt = pig.getLocation().add(0, 1, 0);
                     break;
                 }
                 if (chest == null) break;
@@ -2138,8 +2147,8 @@ public final class Bot {
         Location g = nav.getGoal();
         if (g != null && g.getWorld().equals(l.getWorld()) && Math.hypot(g.getX() - l.getX(), g.getZ() - l.getZ()) < 3) return; // уже на месте
         stuckSince = now;
-        // Рядом закрытая дверь или калитка (путь через калитку навигатор не строит) - открываем и ищем путь заново.
-        if (openNearbyPassages(p) > 0) {
+        // Рядом закрытая дверь или калитка - открываем и ищем путь заново.
+        if (openNearbyPassages(p, now) > 0) {
             nav.clear();
             note(name + " стоит на месте (" + goal + "), открыл дверь/калитку");
             return;
@@ -2147,22 +2156,18 @@ public final class Bot {
         startLocalPath(p, now, "стоит на месте (" + goal + ")");
     }
 
-    /** Открывает закрытые деревянные двери и калитки в 4 блоках вокруг (на уровне ног). Сколько открыл. */
-    private static int openNearbyPassages(Player p) {
-        return openNearbyPassages(p, 4);
-    }
-
-    private static int openNearbyPassages(Player p, int r) {
+    /** Открывает закрытые деревянные двери и калитки рядом (до которых дотянуться рукой). Сколько открыл. */
+    private int openNearbyPassages(Player p, int now) {
         Location l = p.getLocation();
         World w = p.getWorld();
         int fy = (int) Math.floor(l.getY() + 0.01), n = 0;
-        for (int dx = -r; dx <= r; dx++) for (int dz = -r; dz <= r; dz++) for (int dy = -1; dy <= 1; dy++) {
+        for (int dx = -4; dx <= 4; dx++) for (int dz = -4; dz <= 4; dz++) for (int dy = -1; dy <= 1; dy++) {
             Block b = w.getBlockAt(l.getBlockX() + dx, fy + dy, l.getBlockZ() + dz);
             if (!(b.getBlockData() instanceof org.bukkit.block.data.Openable)) continue;
             String t = b.getType().name();
             if (!(t.endsWith("_DOOR") || t.endsWith("_FENCE_GATE")) || t.startsWith("IRON_")) continue;
             if (((org.bukkit.block.data.Openable) b.getBlockData()).isOpen()) continue;
-            if (openPassage(b, false)) n++;
+            if (openPassage(p, b, false, now)) n++;
         }
         return n;
     }
@@ -2172,6 +2177,8 @@ public final class Bot {
         if (f.isLiquid() || h.isLiquid() || floor.isPassable() && f.isPassable()) return false; // вода, лава, нет пола
         Material fm = floor.getType();
         if (fm == Material.LAVA || fm == Material.MAGMA_BLOCK || fm == Material.CACTUS) return false;
+        // Верх забора или стены (полтора блока): на него не запрыгнуть, это не пол.
+        if (f.isPassable() && Motor.tallAt(w, x, z, y - 1)) return false;
         return headroom(w, x, y, z) >= 1.5; // присев пролезем
     }
 
@@ -2287,8 +2294,8 @@ public final class Bot {
         if (d2 > 2.5 * 2.5 || Math.abs(l.getY() - c[1]) > 2.5 || now - wanderBestTick > 40) {
             wanderUntil = -1; wanderPath = null; BotNms.sneak(p, false); nav.clear(); return;
         }
-        openPassage(w.getBlockAt(c[0], c[1], c[2]), false);
-        openPassage(w.getBlockAt(c[0], c[1] + 1, c[2]), true);
+        openPassage(p, w.getBlockAt(c[0], c[1], c[2]), false, now);
+        openPassage(p, w.getBlockAt(c[0], c[1] + 1, c[2]), true, now);
         double here = headroom(w, l.getBlockX(), l.getY(), l.getBlockZ()), there = headroom(w, c[0], c[1], c[2]);
         boolean crouch = here > 0 && here < 1.8 || there > 0 && there < 1.8;
         boolean up = c[1] > l.getY() + 0.5;
@@ -2566,31 +2573,56 @@ public final class Bot {
         double len = Math.hypot(dx, dz);
         if (len > 1e-3) {
             int fx = (int) Math.floor(l.getX() + dx / len * 0.8), fz = (int) Math.floor(l.getZ() + dz / len * 0.8);
-            openPassage(w.getBlockAt(fx, fy, fz), false);
-            openPassage(w.getBlockAt(fx, fy + 1, fz), true);
+            openPassage(p, w.getBlockAt(fx, fy, fz), false, now);
+            openPassage(p, w.getBlockAt(fx, fy + 1, fz), true, now);
         }
         // Люк в потолке над лестницей.
-        if (p.isClimbing()) openPassage(w.getBlockAt(l.getBlockX(), fy + 2, l.getBlockZ()), true);
+        if (p.isClimbing()) openPassage(p, w.getBlockAt(l.getBlockX(), fy + 2, l.getBlockZ()), true, now);
     }
 
     /**
      * Открыть дверь/калитку/люк (не железные, не за зоной). Люк - только мешающий голове или
      * сверху, не в полу. true - открыли.
      */
-    private static boolean openPassage(Block b, boolean trapdoorOk) {
+    private boolean openPassage(Player p, Block b, boolean trapdoorOk, int now) {
         org.bukkit.block.data.BlockData d = b.getBlockData();
         if (!(d instanceof org.bukkit.block.data.Openable)) return false;
         String type = b.getType().name();
         if (type.startsWith("IRON_") || !Builder.inZone(b)) return false;
         boolean trap = type.endsWith("_TRAPDOOR");
         if (trap ? !trapdoorOk : !(type.endsWith("_DOOR") || type.endsWith("_FENCE_GATE"))) return false;
-        org.bukkit.block.data.Openable o = (org.bukkit.block.data.Openable) d;
-        if (o.isOpen()) return false;
-        o.setOpen(true);
-        b.setBlockData(o, true);
-        b.getWorld().playSound(b.getLocation(), trap ? org.bukkit.Sound.BLOCK_WOODEN_TRAPDOOR_OPEN
-            : type.endsWith("_GATE") ? org.bukkit.Sound.BLOCK_FENCE_GATE_OPEN : org.bukkit.Sound.BLOCK_WOODEN_DOOR_OPEN, 1f, 1f);
-        return true;
+        return clickOpen(p, b, now);
+    }
+
+    /**
+     * Открыть, как игрок: ПКМ по закрытой двери, калитке или люку. Сервер сам проверяет
+     * дальность, зону, приваты и запреты других плагинов, звук тоже его. true - открылась.
+     */
+    boolean clickOpen(Player p, Block b, int now) {
+        if (!(b.getBlockData() instanceof org.bukkit.block.data.Openable)
+                || ((org.bukkit.block.data.Openable) b.getBlockData()).isOpen()) return false;
+        Location eye = p.getEyeLocation();
+        double cx = b.getX() + 0.5 - eye.getX(), cy = b.getY() + 0.5 - eye.getY(), cz = b.getZ() + 0.5 - eye.getZ();
+        if (cx * cx + cy * cy + cz * cz > 4.4 * 4.4 || now < busyUntil) return false;
+        // Плагинный предмет в руке (ствол, дрон, рация) сработает от ПКМ сам: сначала пустая рука.
+        ItemStack held = p.getInventory().getItemInMainHand();
+        if (held != null && !held.getType().isAir() && held.hasItemMeta() && Items.isCustom(held)) {
+            int slot = freeHandSlot(p);
+            if (slot < 0 || !hold(p, slot, now)) return false;
+        }
+        // Присев с вещью в руке дверь не открыть.
+        if (p.isSneaking()) BotNms.sneak(p, false);
+        // Жмём по грани, которая смотрит на бота.
+        int face;
+        if (Math.abs(cy) > Math.max(Math.abs(cx), Math.abs(cz))) face = cy > 0 ? 0 : 1;
+        else if (Math.abs(cx) >= Math.abs(cz)) face = cx > 0 ? 4 : 5;
+        else face = cz > 0 ? 2 : 3;
+        BotNms.useItemOn(p, b.getX(), b.getY(), b.getZ(), face);
+        p.swingMainHand();
+        boolean open = b.getBlockData() instanceof org.bukkit.block.data.Openable
+            && ((org.bukkit.block.data.Openable) b.getBlockData()).isOpen();
+        if (!open) note(name + " не смог открыть " + b.getType() + " " + b.getX() + "," + b.getY() + "," + b.getZ());
+        return open;
     }
 
     // =====================================================================  рыхлый снег
@@ -2812,7 +2844,9 @@ public final class Bot {
         // Летающая постройка: под полом пустота. Побыли на ней ~12 секунд, а цель не тут - слезаем.
         if (now >= platformCheckAt) {
             platformCheckAt = now + 40;
-            platformChecks = now >= platformBanUntil && BotNms.onGround(p) && onFloatingFloor(p) ? platformChecks + 1 : 0;
+            // В прыжке (бег прыжками) не сбрасываем: проверяем только стоя на полу.
+            if (now < platformBanUntil) platformChecks = 0;
+            else if (BotNms.onGround(p)) platformChecks = onFloatingFloor(p) ? platformChecks + 1 : 0;
         }
         boolean platform = platformChecks >= 6;
         // Спуск (лестница в доме тоже крутится на пятачке) ловушкой не считаем.
@@ -2833,7 +2867,7 @@ public final class Bot {
         Location g = nav.getGoal();
         if (g != null && !g.getWorld().equals(l.getWorld())) g = null;
         // Заперты в комнате с дверью или калиткой - открываем и пробуем путь заново.
-        if (now - trapSince >= 20 * 6 && openNearbyPassages(p, 10) > 0) {
+        if (now - trapSince >= 20 * 6 && openNearbyPassages(p, now) > 0) {
             trapSince = now;
             platformChecks = 0;
             nav.clear();
@@ -2850,7 +2884,7 @@ public final class Bot {
         // Кружим на пятачке 8 секунд, цель далеко, а пути к ней нет: свой короткий поиск (присев,
         // через двери, ступеньками) уводит туда, где просторнее, не дожидаясь отхода по следам.
         if (now - trapSince >= 20 * 8 && now >= localTryAt && now >= wanderUntil && g.distanceSquared(trapAnchor) >= 16 * 16
-                && !(nav.hasPath() && nav.reaches())) {
+                && !(nav.hasPath() && nav.reaches()) && platformChecks == 0 && !onFloatingFloor(p)) { // с летающей постройки - своим спуском
             localTryAt = now + 20 * 8;
             if (startLocalPath(p, now, "кружит на месте (" + goal + ")")) return;
         }
@@ -2858,7 +2892,7 @@ public final class Bot {
         boolean below = now >= belowBanUntil && g.getY() < l.getY() - 3.5
             && Math.hypot(g.getX() - l.getX(), g.getZ() - l.getZ()) < 24 && !(nav.hasPath() && nav.reaches());
         if (!below && (now - trapSince < 20 * 25 || g.distanceSquared(trapAnchor) < 16 * 16)) return;
-        startEscape(p, now, below, false, g);
+        startEscape(p, now, below, !below && onFloatingFloor(p), g);
     }
 
     private void startEscape(Player p, int now, boolean below, boolean platform, Location g) {
@@ -3011,53 +3045,78 @@ public final class Bot {
      * Край, с которого спрыгнуть с наименьшим уроном: внизу вода, слизь, сено или
      * снег - лучше всего, иначе самая малая высота. Лаву, огонь, кактусы и бездну не берём.
      * Урон (с поправкой на парашют/зелье) не больше cap и не смертельный.
+     *
+     * Края ищем обходом площадки, по которой бот может пройти (в пределах maxR): так
+     * находится и узкий проход в заборе по краю крыши или летающей постройки, в который
+     * лучи от места бота не попадали.
      */
     private Drop bestDropEdge(Player p, Location toward, double cap, int maxR) {
         Location l = p.getLocation();
         World w = p.getWorld();
-        int fy = l.getBlockY();
+        int fy = l.getBlockY(), sx0 = l.getBlockX(), sz0 = l.getBlockZ();
         // К цели внизу (союзник под крышей): прыгаем там, где опустимся до её высоты, поближе к ней.
         boolean below = toward != null;
         // Парашют или зелье: с любой высоты почти без урона (парашют раскрывается за секунду,
         // до этого пролетаем блоков пять).
         boolean saver = p.hasPotionEffect(PotionEffectType.SLOW_FALLING) || fallSaverCount(p) > 0;
+        int[][] dirs = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        java.util.Map<Long, Integer> dist = new java.util.HashMap<Long, Integer>();
+        java.util.ArrayDeque<int[]> q = new java.util.ArrayDeque<int[]>();
+        q.add(new int[]{sx0, sz0});
+        dist.put(cellKey(sx0, fy, sz0), 0);
         Drop best = null;
         double bestCost = Double.MAX_VALUE;
-        for (int a = 0; a < 16; a++) {
-            double ang = a * Math.PI / 8, ux = -Math.sin(ang), uz = Math.cos(ang);
-            boolean rim = false;
-            int sx = l.getBlockX(), sz = l.getBlockZ();
-            for (int r = 1; r <= maxR; r++) {
-                int x = (int) Math.floor(l.getX() + ux * r), z = (int) Math.floor(l.getZ() + uz * r);
-                Block feet = w.getBlockAt(x, fy, z);
-                Block head = feet.getRelative(org.bukkit.block.BlockFace.UP);
-                // Бортик в блок (не забор) перепрыгнем, дальше по лучу.
-                if (!feet.isPassable() && head.isPassable() && head.getRelative(org.bukkit.block.BlockFace.UP).isPassable()
-                        && !Motor.tallAt(w, x, z, fy)) { rim = true; continue; } // забор так не взять
-                if (!feet.isPassable() || !head.isPassable()) break; // стена
-                if (!feet.getRelative(org.bukkit.block.BlockFace.DOWN).isPassable()) { sx = x; sz = z; continue; } // ещё пол
+        while (!q.isEmpty() && dist.size() < 1600) {
+            int[] c = q.poll();
+            int steps = dist.get(cellKey(c[0], fy, c[1]));
+            for (int[] d : dirs) {
+                int nx = c[0] + d[0], nz = c[1] + d[1];
+                if (Math.abs(nx - sx0) > maxR || Math.abs(nz - sz0) > maxR) continue;
+                Block feet = w.getBlockAt(nx, fy, nz), head = feet.getRelative(org.bukkit.block.BlockFace.UP);
+                boolean rim = false;
+                int ex = nx, ez = nz;
+                if (!feet.isPassable()) {
+                    // Бортик в блок (не забор): перепрыгнем, край - за ним.
+                    if (!head.isPassable() || !head.getRelative(org.bukkit.block.BlockFace.UP).isPassable() || Motor.tallAt(w, nx, nz, fy)) continue;
+                    rim = true;
+                    ex = nx + d[0]; ez = nz + d[1];
+                    Block f2 = w.getBlockAt(ex, fy, ez);
+                    if (!f2.isPassable() || !f2.getRelative(org.bukkit.block.BlockFace.UP).isPassable()) continue;
+                } else if (!head.isPassable()) continue; // низкий потолок, туда не шагнуть
+                Block floor = w.getBlockAt(ex, fy - 1, ez);
+                if (!rim && !floor.isPassable()) {
+                    // Ещё площадка - идём дальше.
+                    long k = cellKey(nx, fy, nz);
+                    if (!dist.containsKey(k) && walkable(w, nx, fy, nz)) { dist.put(k, steps + 1); q.add(new int[]{nx, nz}); }
+                    continue;
+                }
+                if (!floor.isPassable()) continue; // за бортиком сразу пол, это не край
                 // Край. Шагнув с него, пролетаем ещё блок-два вперёд: смотрим и туда.
-                boolean found = false;
                 for (int k = 0; k <= 2; k++) {
-                    int lx = (int) Math.floor(l.getX() + ux * (r + k)), lz = (int) Math.floor(l.getZ() + uz * (r + k));
+                    int lx = ex + d[0] * k, lz = ez + d[1] * k;
                     if (k > 0 && !(w.getBlockAt(lx, fy, lz).isPassable() && w.getBlockAt(lx, fy + 1, lz).isPassable())) break;
+                    // В полёте сносит на блок: безопасной должна быть и соседняя земля (вперёд и по бокам),
+                    // иначе бот промахивался мимо узкого столбика и разбивался.
                     double raw = landingDamage(w, lx, fy, lz);
+                    for (int[] o : new int[][]{{d[0], d[1]}, {d[1], d[0]}, {-d[1], -d[0]}}) {
+                        if (raw < 0) break;
+                        double r2 = landingDamage(w, lx + o[0], fy, lz + o[1]);
+                        raw = r2 < 0 ? -1 : Math.max(raw, r2);
+                    }
                     if (raw < 0) continue; // лава, огонь, бездна
                     if (rim) raw += 2; // через бортик прыгаем - падать выше
                     double dmg = saver ? Math.min(raw, 1) : raw;
                     if (dmg >= p.getHealth() || dmg > cap) continue;
                     double ly = landingY(w, lx, fy, lz);
-                    // Скат крыши, ступенька: так вниз к цели не спуститься, край ищем дальше по лучу.
+                    // Скат крыши, ступенька: так вниз к цели не спуститься.
                     if (below && ly > toward.getY() + 2) continue;
-                    double cost = dmg * 10 + r + k;
+                    double cost = dmg * 10 + steps + k;
                     if (below) cost += Math.hypot(lx + 0.5 - toward.getX(), lz + 0.5 - toward.getZ()) * 0.7;
-                    found = true;
                     if (cost < bestCost) {
                         bestCost = cost;
-                        best = new Drop(new Location(w, lx + 0.5, ly, lz + 0.5), new Location(w, sx + 0.5, fy, sz + 0.5), raw);
+                        best = new Drop(new Location(w, lx + 0.5, ly, lz + 0.5), new Location(w, c[0] + 0.5, fy, c[1] + 0.5), raw);
                     }
                 }
-                if (found || !below) break; // край на этом луче найден
             }
         }
         return best;
