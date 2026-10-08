@@ -65,6 +65,8 @@ public final class NmsBlockView implements BlockView {
     private final LongSet noBreak;
     private LevelChunk chunk;
     private int chunkX = Integer.MIN_VALUE, chunkZ;
+    /** Двери, которые не открываются (защита региона, плагин): закрытые - стена. Может быть null. */
+    public java.util.function.LongPredicate locked;
     /** Границы зоны на момент поиска (за ними блоки не ломают, не ставят и не открывают). */
     private double zMinX, zMaxX, zMinZ, zMaxZ;
 
@@ -165,8 +167,8 @@ public final class NmsBlockView implements BlockView {
         if (id < 0 || id >= typeByState.length) return classify(s);
         byte t = typeByState[id];
         if (t == UNKNOWN) typeByState[id] = t = classify(s);
-        // Закрытую дверь за зоной не открыть: это стена.
-        if ((t & Cell.KIND) == Cell.DOOR && !inZone(x, z)
+        // Закрытую дверь за зоной (или запертую) не открыть: это стена.
+        if ((t & Cell.KIND) == Cell.DOOR && (!inZone(x, z) || locked != null && locked.test(Pos.pack(x, y, z)))
                 && !(s.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.OPEN)
                      && s.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.OPEN))) return Cell.OBSTACLE;
         return t;

@@ -223,7 +223,7 @@ public final class Navigator {
      * а не крыша. MIN_VALUE - в пределах 8 блоков встать негде.
      */
     int standY(World w, int x, int z, int near) {
-        if (live == null || !live.sameWorld(w)) live = new NmsBlockView(w, false, null, null);
+        if (live == null || !live.sameWorld(w)) { live = new NmsBlockView(w, false, null, null); live.locked = Bot::isLocked; }
         for (int d = 0; d <= 8; d++) {
             if (Cell.stand(live, x, near - d, z)) return near - d;
             if (d > 0 && Cell.stand(live, x, near + d, z)) return near + d;
@@ -290,7 +290,7 @@ public final class Navigator {
             search = null;
             return m;
         }
-        if (live == null || !live.sameWorld(pos.getWorld())) live = new NmsBlockView(pos.getWorld(), false, null, null);
+        if (live == null || !live.sameWorld(pos.getWorld())) { live = new NmsBlockView(pos.getWorld(), false, null, null); live.locked = Bot::isLocked; }
         live.newTick();
         if (serverTick >= noBreakClearAt) { noBreak.clear(); noBreakClearAt = serverTick + 20 * 60; }
 
@@ -326,6 +326,7 @@ public final class Navigator {
                 tx = s.x + 0.5; tz = s.z + 0.5;
                 nodeY = s.y;
                 openDoorIfNeeded(p, s, pos);
+                if (steps == null) return m; // дверь заперта - путь сброшен, строим заново
                 if (smart && plain(s)) {
                     int vis = lookahead(pos, s, serverTick);
                     if (vis > idx) {
@@ -442,6 +443,7 @@ public final class Navigator {
     private void startSearch(Player p, Location pos, int tick, boolean onGround, boolean inWater) {
         World w = pos.getWorld();
         NmsBlockView view = new NmsBlockView(w, true, tools(p), noBreak);
+        view.locked = Bot::isLocked;
         int sx = pos.getBlockX(), sy = (int) Math.floor(pos.getY() + 0.2), sz = pos.getBlockZ();
         // В воздухе ищем от клетки, куда приземлимся.
         if (!onGround && !inWater) {

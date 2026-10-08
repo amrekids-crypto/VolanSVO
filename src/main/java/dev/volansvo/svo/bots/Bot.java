@@ -446,6 +446,9 @@ public final class Bot {
 
     int met(String player) { return skill.memory ? memory.met(player) : 0; }
 
+    /** Действует защита от падения после крюка или ранца (её отмену урона не возвращаем). */
+    boolean fallImmune(int now) { return leap != null || now < leapImmuneUntil + 10; }
+
     /** Не повторяться: true - эту реплику бот недавно уже говорил (и запоминаем её). */
     boolean repeats(String line) { return skill.memory && memory.repeats(line); }
 
@@ -763,6 +766,8 @@ public final class Bot {
             Mob mob = (Mob) e;
             if (mob.getTarget() == null || !mob.getTarget().getUniqueId().equals(id)) continue;
             if (isFaction(mob)) { avoidFaction(mob, now); continue; } // с бандами хаоса не связываемся
+            // Неуязвимый (тотем-страж телекинетика и т.п.): не убить - уходим от него.
+            if (mob.isInvulnerable()) { markDanger(mob.getLocation(), 40, now); continue; }
             Contact c = contact(mob);
             c.last = mob.getLocation();
             c.seenTick = now;
@@ -1639,6 +1644,8 @@ public final class Bot {
     private static boolean woodenPassage(Block b) {
         String t = b.getType().name();
         if (!(t.endsWith("_DOOR") || t.endsWith("_FENCE_GATE")) || t.startsWith("IRON_")) return false;
+        boolean open = b.getBlockData() instanceof org.bukkit.block.data.Openable && ((org.bukkit.block.data.Openable) b.getBlockData()).isOpen();
+        if (!open && isLocked(b.getX(), b.getY(), b.getZ())) return false; // не открывается
         // За зоной закрытую не открыть.
         return Builder.inZone(b) || b.getBlockData() instanceof org.bukkit.block.data.Openable
             && ((org.bukkit.block.data.Openable) b.getBlockData()).isOpen();
@@ -2361,6 +2368,9 @@ public final class Bot {
         if (g == null || !g.getWorld().equals(l.getWorld())) return;
         double dy = g.getY() - l.getY();
         if (Math.abs(dy) < 3 || nav.hasPath() && nav.reaches()) return;
+        // Лестница - к цели рядом (крыша, подвал). Далёкая цель ниже или выше просто по рельефу:
+        // лезть ради неё в колодец бесполезно.
+        if (Math.hypot(g.getX() - l.getX(), g.getZ() - l.getZ()) > 20) return;
         boolean up = dy > 0;
         World w = p.getWorld();
         int fy = (int) Math.floor(l.getY() + 0.01), bx = l.getBlockX(), bz = l.getBlockZ();
@@ -2601,6 +2611,7 @@ public final class Bot {
     boolean clickOpen(Player p, Block b, int now) {
         if (!(b.getBlockData() instanceof org.bukkit.block.data.Openable)
                 || ((org.bukkit.block.data.Openable) b.getBlockData()).isOpen()) return false;
+        if (isLocked(b.getX(), b.getY(), b.getZ())) return false; // уже знаем: не открывается
         Location eye = p.getEyeLocation();
         double cx = b.getX() + 0.5 - eye.getX(), cy = b.getY() + 0.5 - eye.getY(), cz = b.getZ() + 0.5 - eye.getZ();
         if (cx * cx + cy * cy + cz * cz > 4.4 * 4.4 || now < busyUntil) return false;
@@ -2612,17 +2623,92 @@ public final class Bot {
         }
         // Присев с вещью в руке дверь не открыть.
         if (p.isSneaking()) BotNms.sneak(p, false);
-        // Жмём по грани, которая смотрит на бота.
+        // Жмём по грани, которая смотрит на бота, и смотрим в точку клика: античит и защита
+        // регионов принимают клик только по тому, на что игрок смотрит.
         int face;
-        if (Math.abs(cy) > Math.max(Math.abs(cx), Math.abs(cz))) face = cy > 0 ? 0 : 1;
-        else if (Math.abs(cx) >= Math.abs(cz)) face = cx > 0 ? 4 : 5;
-        else face = cz > 0 ? 2 : 3;
+        double hx = b.getX() + 0.5, hy = b.getY() + 0.5, hz = b.getZ() + 0.5;
+        if (Math.abs(cy) > Math.max(Math.abs(cx), Math.abs(cz))) { face = cy > 0 ? 0 : 1; hy += cy > 0 ? -0.5 : 0.5; }
+        else if (Math.abs(cx) >= Math.abs(cz)) { face = cx > 0 ? 4 : 5; hx += cx > 0 ? -0.5 : 0.5; }
+        else { face = cz > 0 ? 2 : 3; hz += cz > 0 ? -0.5 : 0.5; }
+        BotNms.look(p, Motor.yawTo(hx - eye.getX(), hz - eye.getZ()),
+            Motor.pitchTo(hx - eye.getX(), hy - eye.getY(), hz - eye.getZ()));
+        motor.sync(p);
         BotNms.useItemOn(p, b.getX(), b.getY(), b.getZ(), face);
         p.swingMainHand();
         boolean open = b.getBlockData() instanceof org.bukkit.block.data.Openable
             && ((org.bukkit.block.data.Openable) b.getBlockData()).isOpen();
-        if (!open) note(name + " не смог открыть " + b.getType() + " " + b.getX() + "," + b.getY() + "," + b.getZ());
-        return open;
+        if (open) return true;
+        // Клик отменил другой плагин (на некоторых серверах у ботов отменяют любые действия,
+        // как у не вошедших игроков) - открываем сами, как раньше.
+        warnClickCancelled(b);
+        if (forceOpen(b)) return true;
+        // Не открылась и так (повторно) - заперта: 2 минуты считаем стеной,
+        // путь идёт в обход, руками в неё не машем. Знание общее для всех ботов.
+        long k = dev.volansvo.svo.bots.nav.Pos.pack(b.getX(), b.getY(), b.getZ());
+        Integer tries = doorTries.get(k);
+        doorTries.put(k, tries == null ? 1 : tries + 1);
+        if (tries != null && tries >= 1) {
+            doorTries.remove(k);
+            lockDoor(b);
+            nav.clear();
+            note(name + " не открывается " + b.getType() + " " + b.getX() + "," + b.getY() + "," + b.getZ() + ", иду в обход");
+        }
+        return false;
+    }
+
+    /** Открыть дверь/калитку/люк напрямую (клик отменён). true - открыта. */
+    private static boolean forceOpen(Block b) {
+        org.bukkit.block.data.BlockData d = b.getBlockData();
+        if (!(d instanceof org.bukkit.block.data.Openable)) return false;
+        org.bukkit.block.data.Openable o = (org.bukkit.block.data.Openable) d;
+        o.setOpen(true);
+        b.setBlockData(o, true);
+        String type = b.getType().name();
+        b.getWorld().playSound(b.getLocation(), type.endsWith("_TRAPDOOR") ? org.bukkit.Sound.BLOCK_WOODEN_TRAPDOOR_OPEN
+            : type.endsWith("_GATE") ? org.bukkit.Sound.BLOCK_FENCE_GATE_OPEN : org.bukkit.Sound.BLOCK_WOODEN_DOOR_OPEN, 1f, 1f);
+        return b.getBlockData() instanceof org.bukkit.block.data.Openable && ((org.bukkit.block.data.Openable) b.getBlockData()).isOpen();
+    }
+
+    private final java.util.Map<Long, Integer> doorTries = new java.util.HashMap<Long, Integer>();
+    /** Двери, которые не открылись от ПКМ: позиция -> до какого времени (мс) считаем запертой. */
+    private static final java.util.Map<Long, Long> LOCKED = new java.util.HashMap<Long, Long>();
+    private static boolean warnedLocked;
+
+    static boolean isLocked(int x, int y, int z) {
+        return isLocked(dev.volansvo.svo.bots.nav.Pos.pack(x, y, z));
+    }
+
+    static boolean isLocked(long k) {
+        if (LOCKED.isEmpty()) return false;
+        Long until = LOCKED.get(k);
+        if (until == null) return false;
+        if (System.currentTimeMillis() < until) return true;
+        LOCKED.remove(k);
+        return false;
+    }
+
+    /** Запомнить запертую дверь (обе половины). */
+    private static void lockDoor(Block b) {
+        long until = System.currentTimeMillis() + 120_000L;
+        LOCKED.put(dev.volansvo.svo.bots.nav.Pos.pack(b.getX(), b.getY(), b.getZ()), until);
+        if (b.getBlockData() instanceof org.bukkit.block.data.Bisected) {
+            boolean top = ((org.bukkit.block.data.Bisected) b.getBlockData()).getHalf() == org.bukkit.block.data.Bisected.Half.TOP;
+            Block o = b.getRelative(top ? org.bukkit.block.BlockFace.DOWN : org.bukkit.block.BlockFace.UP);
+            LOCKED.put(dev.volansvo.svo.bots.nav.Pos.pack(o.getX(), o.getY(), o.getZ()), until);
+        }
+        if (LOCKED.size() > 500) LOCKED.clear();
+    }
+
+    /** Один раз в консоль: ПКМ бота по двери отменили - кто слушает клики. */
+    private static void warnClickCancelled(Block b) {
+        if (warnedLocked) return;
+        warnedLocked = true;
+        java.util.Set<String> who = new java.util.TreeSet<String>();
+        for (org.bukkit.plugin.RegisteredListener rl : org.bukkit.event.player.PlayerInteractEvent.getHandlerList().getRegisteredListeners())
+            who.add(rl.getPlugin().getName());
+        org.bukkit.Bukkit.getLogger().warning("[VolanSVO] ПКМ бота по " + b.getType() + " в " + b.getWorld().getName() + " "
+            + b.getX() + "," + b.getY() + "," + b.getZ() + " отменил другой плагин (защита региона, античит, авторизация). "
+            + "Клики слушают: " + who + ". Двери боты открывают сами.");
     }
 
     // =====================================================================  рыхлый снег
@@ -3335,6 +3421,15 @@ public final class Bot {
             return;
         }
 
+        // Телекинетик в руке и враг рядом: присел-встал - тотем-страж (раз в 15 секунд).
+        boolean totem = now < totemSneakUntil;
+        if (!totem && visible && w == Weapon.MELEE && d < 12 && now >= nextTotem && ready
+                && Items.isTelekinetic(p.getInventory().getItemInMainHand())) {
+            nextTotem = now + 20 * 15;
+            totemSneakUntil = now + 3;
+            totem = true;
+            note(name + " ставит тотем телекинетика на " + e.getName());
+        }
         if (w == Weapon.MELEE) {
             double hl = Math.max(1e-6, Math.hypot(dx, dz));
             // Между нами забор или стена выше прыжка. Пока идём к проходу, режим держим, иначе на
@@ -3377,7 +3472,7 @@ public final class Bot {
                 boolean critAir = critJumped && !onGround;
                 driveSafe(p, dx, dz, fwd, side, jumpCrit || (BotNms.horizontalCollision(p) && onGround), !wtap && !critAir);
             }
-            BotNms.sneak(p, false);
+            BotNms.sneak(p, totem);
             if (reactionLeft > 0) { reactionLeft--; return; }
             boolean falling = !onGround && p.getVelocity().getY() < -0.05;
             boolean critWindow = !critJumped || falling;
@@ -4214,7 +4309,7 @@ public final class Bot {
         tauntOnAttack(p, e);
     }
 
-    private int fenceSide, fenceSideUntil;
+    private int fenceSide, fenceSideUntil, nextTotem, totemSneakUntil;
 
     /**
      * Куда идти вдоль забора к ближайшему проходу (в 24 блоках). Забор считаем идущим
@@ -5529,7 +5624,8 @@ public final class Bot {
                     if (++guns > 2) return i;
                     break;
                 case CUSTOM:
-                    if (Items.customType(it) == Items.Custom.UNKNOWN && !EiKit.handled(it) && mgr.learning().valueOf(Items.customKey(it)) <= 0) return i;
+                    if (Items.customType(it) == Items.Custom.UNKNOWN && !EiKit.handled(it) && mgr.learning().valueOf(Items.customKey(it)) <= 0
+                            && !mgr.learning().worthTrying(Items.customKey(it))) return i; // ещё не пробовали - держим
                     break;
                 default:
                     break;

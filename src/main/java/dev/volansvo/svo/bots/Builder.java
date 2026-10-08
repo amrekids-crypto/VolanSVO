@@ -113,11 +113,16 @@ final class Builder {
             crack(p, b, -1f);
             mining = null;
             progress = 0f;
-            // BlockBreakEvent, дроп, износ инструмента - как у игрока. Не дали сломать - минуту не трогаем.
+            // BlockBreakEvent, дроп, износ инструмента - как у игрока.
             if (!p.breakBlock(b)) {
-                denied.put(key(b), System.currentTimeMillis() + 60_000L);
+                // Отменил другой плагин (на некоторых серверах у ботов отменяют любые действия, как у
+                // не вошедших игроков): блок в зоне ломаем сами, с выпадением. Не вышло - минуту не трогаем.
                 warnDenied(b);
-                if (debugLog != null) debugLog.accept("не дали сломать " + b.getType() + " " + b.getX() + "," + b.getY() + "," + b.getZ());
+                Material was = b.getType();
+                if (!inZone(b) || !b.breakNaturally(p.getInventory().getItemInMainHand(), true) && b.getType() == was) {
+                    denied.put(key(b), System.currentTimeMillis() + 60_000L);
+                    if (debugLog != null) debugLog.accept("не дали сломать " + was + " " + b.getX() + "," + b.getY() + "," + b.getZ());
+                }
             }
             return false;
         }
@@ -155,8 +160,9 @@ final class Builder {
         java.util.Set<String> who = new java.util.TreeSet<String>();
         for (org.bukkit.plugin.RegisteredListener rl : org.bukkit.event.block.BlockBreakEvent.getHandlerList().getRegisteredListeners())
             who.add(rl.getPlugin().getName());
-        org.bukkit.Bukkit.getLogger().warning("[VolanSVO] Бот не смог сломать " + b.getType() + " в " + b.getWorld().getName() + " "
-            + b.getX() + "," + b.getY() + "," + b.getZ() + ": BlockBreakEvent отменил другой плагин. Его слушают: " + who);
+        org.bukkit.Bukkit.getLogger().warning("[VolanSVO] Ломание блока ботом " + b.getType() + " в " + b.getWorld().getName() + " "
+            + b.getX() + "," + b.getY() + "," + b.getZ() + " отменил другой плагин (защита региона, античит, авторизация). "
+            + "BlockBreakEvent слушают: " + who + ". Блоки в зоне боты ломают сами.");
     }
 
     private static long key(Block b) {

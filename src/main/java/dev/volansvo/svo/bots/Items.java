@@ -173,6 +173,8 @@ public final class Items {
         if (wid != null) return warkitKind(wid, it);
         Material m = it.getType();
         String n = m.name();
+        // Телекинетик (EI): им бьют врага, и в цель летят камни. Для бота это оружие ближнего боя.
+        if (isTelekinetic(it)) return Kind.MELEE;
         // Плагинные стволы часто сделаны из мотыги/лука/арбалета - сначала смотрим, не они ли это.
         if (isCustom(it) && !n.endsWith("_SWORD") && !n.endsWith("_AXE") && !isArmor(m)
                 && !((m == Material.BOW || m == Material.CROSSBOW || m == Material.SHIELD || m == Material.TRIDENT)
@@ -293,7 +295,15 @@ public final class Items {
     // ------------------------------------------------------------------ оценки
 
     /** Урон в секунду ближнего боя (с учётом скорости атаки и остроты). */
+    /** Телекинетик ExecutableItems (telekinez): удар по игроку запускает в него камни, присед - тотем. */
+    public static boolean isTelekinetic(ItemStack it) {
+        String id = eiId(it);
+        return id != null && id.toLowerCase(Locale.ROOT).startsWith("telekin");
+    }
+
     public static double meleeDps(ItemStack it) {
+        // Телекинетик: к удару (+4) каждый удар по игроку добавляет камни, до 18 урона.
+        if (isTelekinetic(it)) return 22;
         double dmg = 1.0, speed = 4.0;
         Collection<AttributeModifier> d = modifiers(it, Attribute.ATTACK_DAMAGE, EquipmentSlot.HAND);
         Collection<AttributeModifier> s = modifiers(it, Attribute.ATTACK_SPEED, EquipmentSlot.HAND);
@@ -377,7 +387,11 @@ public final class Items {
                     case AMMO: return 15;
                     default: {
                         double ev = EiKit.value(it);
-                        return ev > 0 ? ev : learning.valueOf(Items.customKey(it));
+                        if (ev > 0) return ev;
+                        // Незнакомый предмет (часто крутой лут из аирдропа): берём, если есть место,
+                        // и пробуем в бою. Попробовали и толку нет - больше не берём.
+                        String key = Items.customKey(it);
+                        return learning.worthTrying(key) ? 8 : learning.valueOf(key);
                     }
                 }
             }

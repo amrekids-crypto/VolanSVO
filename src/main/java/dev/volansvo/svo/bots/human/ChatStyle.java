@@ -41,7 +41,8 @@ public final class ChatStyle {
         StringBuilder out = new StringBuilder(line.length() + 4);
         // Режем на текст и вставки {x}: вставки идут как есть.
         int i = 0;
-        boolean typoDone = false;
+        // Опечатка - примерно в каждой третьей реплике того, кто пишет с опечатками.
+        boolean typoDone = style != Style.TYPO || rnd.nextInt(3) != 0;
         while (i < line.length()) {
             int open = line.indexOf('{', i);
             int close = open < 0 ? -1 : line.indexOf('}', open);

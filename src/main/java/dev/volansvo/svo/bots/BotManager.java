@@ -413,10 +413,13 @@ public final class BotManager implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onDamageGuard(EntityDamageEvent e) {
         if (!e.isCancelled() || !(e.getEntity() instanceof Player)) return;
-        // Только удары и выстрелы: падение и прочее отменяют свои механики (защита от падения
-        // после крюка и ранца MilitaryCraft, парашют), их не возвращаем.
-        if (!(e instanceof EntityDamageByEntityEvent)) return;
         Player victim = (Player) e.getEntity();
+        // Падение после крюка и ранца MilitaryCraft отменяет сам (неуязвимость) - его не возвращаем.
+        // Остальное (зона, лава, удушье, удары) возвращаем: иначе бот за зоной не умирал.
+        if (!(e instanceof EntityDamageByEntityEvent) && e.getCause() == EntityDamageEvent.DamageCause.FALL) {
+            Bot fb = bots.get(victim.getUniqueId());
+            if (fb == null || fb.fallImmune(tick)) return;
+        }
         LivingEntity attacker = (e instanceof EntityDamageByEntityEvent) ? source(((EntityDamageByEntityEvent) e).getDamager()) : null;
         boolean victimBot = isBot(victim);
         boolean attackerBot = attacker instanceof Player && isBot((Player) attacker);
