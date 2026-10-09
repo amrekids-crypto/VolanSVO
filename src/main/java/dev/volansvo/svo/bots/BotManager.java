@@ -222,7 +222,10 @@ public final class BotManager implements Listener {
             BotNms.remove(p);
         }
         plugin.getStatsManager().forget(uid);
-        if (b != null) Bukkit.getScheduler().runTaskLater(plugin, () -> deletePlayerFiles(uid), 20L);
+        if (b != null) {
+            if (plugin.isEnabled()) Bukkit.getScheduler().runTaskLater(plugin, () -> deletePlayerFiles(uid), 20L);
+            else deletePlayerFiles(uid); // сервер выключается: задачи уже не ставятся
+        }
     }
 
     private boolean removingAll;
