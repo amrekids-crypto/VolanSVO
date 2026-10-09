@@ -98,6 +98,9 @@ final class Rides {
      */
     java.util.function.Function<Double, Player> knownEnemy = r -> null;
 
+    /** Как бот любит технику (0..1, из характера): техник садится в неё и на короткий путь. */
+    double vehicleLove = 0.25;
+
     /** Сидим в своём танке (за рулём). */
     boolean inTank() { return mode == Mode.CAR_DRIVE && "tank".equals(carKind); }
 
@@ -196,7 +199,8 @@ final class Rides {
 
         if (travel == null || !travel.getWorld().equals(p.getWorld())) return;
         double far = flat(p.getLocation(), travel);
-        if (far < 45) return;
+        double carFar = 80 - 35 * vehicleLove; // с какой дальности пути садиться за руль
+        if (far < Math.min(45, carFar)) return;
 
         // 2. Зиплайн по пути.
         if (tryZipline(p, now, travel, far)) return;
@@ -204,7 +208,7 @@ final class Rides {
         // 2б. Поезд идёт в нашу сторону (и не в зону) - ждём его у рельсов впереди и садимся.
         if (far >= 60 && now >= banTrainUntil && tryTrain(p, now, travel)) return;
 
-        if (far < 80 || now < banCarsUntil) return;
+        if (far < carFar || now < banCarsUntil) return;
         // 3. Пустая техника рядом - садимся за руль.
         Entity part = nearestEmptyCar(p, 24, null);
         if (part != null) {

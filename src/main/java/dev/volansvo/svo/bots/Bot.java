@@ -282,6 +282,7 @@ public final class Bot {
         });
         this.rides.log = this::note;
         this.rides.knownEnemy = r -> knownEnemy(r, 20 * 30);
+        this.rides.vehicleLove = persona.vehicles;
     }
 
     Player player() {
@@ -788,7 +789,8 @@ public final class Bot {
         return (x, z) -> {
             long key = ((long) ((int) Math.floor(x) >> 3) << 32) ^ (((int) Math.floor(z) >> 3) & 0xffffffffL);
             if (memo.containsKey(key)) return memo.get(key);
-            double c = Math.min(30, tm.heat(x, z, now) * k);
+            // Добавка к цене шага небольшая: обходить горячее место стоит, но не за сотню блоков.
+            double c = Math.min(3, tm.heat(x, z, now) * k * 0.4);
             memo.put(key, c);
             return c;
         };
@@ -4919,6 +4921,8 @@ public final class Bot {
                 case MELEE: case GUN: case LAUNCHER: case SPRAYER: case TRIDENT: case THROW_DAMAGE:
                 case ARMOR: case HEAL: case TOTEM: case SHIELD:
                     useful = true; break;
+                case GADGET: // мины и турели нужны тем, кто их ставит
+                    useful = persona.gadgets > 0.4; break;
                 case BOW: case CROSSBOW:
                     useful = hasArrows(p); break;
                 case CUSTOM: {
@@ -5232,15 +5236,11 @@ public final class Bot {
 
     private int nextRocketHit;
 
-    /**
-     * Летящую ракету (самонаводка «Ракетница» - пуля шалкера, «Пэтриот» MilitaryCraft)
-     * можно сбить ударом. Если такая подлетела на удар - бьём по ней. true - этот тик занят.
-     */
     /** Замеченные ракеты: когда бот успеет на них среагировать (тик). */
     private final Map<UUID, Integer> rocketSeen = new HashMap<UUID, Integer>();
 
     /**
-     * Сбить летящую в нас ракету ударом. Как человек: замечает только ту, что перед глазами
+     * Сбить летящую в нас ракету (пуля шалкера «Ракетницы», «Пэтриот» MilitaryCraft) ударом. Как человек: замечает только ту, что перед глазами
      * (или уже совсем рядом), реагирует не сразу, голову доводит, а не щёлкает. Раньше бот
      * мгновенно разворачивался к ракете за спиной.
      */
