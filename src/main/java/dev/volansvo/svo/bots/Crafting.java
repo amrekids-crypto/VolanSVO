@@ -109,11 +109,18 @@ final class Crafting {
     }
 
     /** Две доски в палки. */
+    /** Порода досок, которых не меньше n штук (доски разных пород в одном рецепте - не у всех рецептов). */
+    private static Material planksWithAtLeast(PlayerInventory inv, int n) {
+        for (int i = 0; i < 36; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it != null && !it.hasItemMeta() && isPlanks(it.getType()) && count(inv, it.getType()) >= n) return it.getType();
+        }
+        return null;
+    }
+
     static boolean sticks(World w, PlayerInventory inv) {
-        int s = firstTag(inv, false);
-        if (s < 0) return false;
-        Material pl = inv.getItem(s).getType();
-        if (count(inv, pl) < 2) return false;
+        Material pl = planksWithAtLeast(inv, 2);
+        if (pl == null) return false;
         ItemStack[] g = new ItemStack[9];
         g[0] = new ItemStack(pl);
         g[3] = new ItemStack(pl);
@@ -126,11 +133,7 @@ final class Crafting {
 
     /** Четыре доски одной породы в верстак. */
     static boolean table(World w, PlayerInventory inv) {
-        Material pl = null;
-        for (int i = 0; i < 36 && pl == null; i++) {
-            ItemStack it = inv.getItem(i);
-            if (it != null && !it.hasItemMeta() && isPlanks(it.getType()) && count(inv, it.getType()) >= 4) pl = it.getType();
-        }
+        Material pl = planksWithAtLeast(inv, 4);
         if (pl == null) return false;
         ItemStack[] g = new ItemStack[9];
         g[0] = new ItemStack(pl); g[1] = new ItemStack(pl); g[3] = new ItemStack(pl); g[4] = new ItemStack(pl);

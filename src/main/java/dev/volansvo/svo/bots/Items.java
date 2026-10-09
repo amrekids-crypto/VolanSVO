@@ -352,12 +352,23 @@ public final class Items {
                 if (e == EquipmentSlot.HEAD || e == EquipmentSlot.CHEST || e == EquipmentSlot.LEGS || e == EquipmentSlot.FEET) return e;
             }
         } catch (Throwable ignored) {}
+        // Оружие и инструменты с бонусом к броне («в любой руке») бронёй не считаем.
+        String n = it.getType().name();
+        if (n.endsWith("_SWORD") || n.endsWith("_AXE") || n.endsWith("_PICKAXE") || n.endsWith("_SHOVEL") || n.endsWith("_HOE")
+                || n.equals("MACE") || n.equals("TRIDENT") || n.equals("BOW") || n.equals("CROSSBOW") || n.equals("SHIELD")
+                || n.equals("TOTEM_OF_UNDYING")) return null;
         if (m.hasAttributeModifiers()) {
-            for (EquipmentSlot e : new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET}) {
-                for (Attribute a : new Attribute[]{Attribute.ARMOR, Attribute.ARMOR_TOUGHNESS}) {
-                    Collection<AttributeModifier> c = m.getAttributeModifiers(a);
-                    if (c == null) continue;
-                    for (AttributeModifier am : c) if (am.getSlotGroup().test(e) && am.getAmount() > 0) return e;
+            org.bukkit.inventory.EquipmentSlotGroup[] groups = {org.bukkit.inventory.EquipmentSlotGroup.HEAD,
+                org.bukkit.inventory.EquipmentSlotGroup.CHEST, org.bukkit.inventory.EquipmentSlotGroup.LEGS,
+                org.bukkit.inventory.EquipmentSlotGroup.FEET};
+            EquipmentSlot[] slots = {EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET};
+            for (Attribute a : new Attribute[]{Attribute.ARMOR, Attribute.ARMOR_TOUGHNESS}) {
+                Collection<AttributeModifier> c = m.getAttributeModifiers(a);
+                if (c == null) continue;
+                // Только модификатор именно на слот брони (не «любой слот», не «вся броня»).
+                for (AttributeModifier am : c) {
+                    if (am.getAmount() <= 0) continue;
+                    for (int i = 0; i < 4; i++) if (groups[i].equals(am.getSlotGroup())) return slots[i];
                 }
             }
         }

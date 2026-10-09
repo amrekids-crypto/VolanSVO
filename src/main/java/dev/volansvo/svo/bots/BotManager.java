@@ -324,7 +324,7 @@ public final class BotManager implements Listener {
         for (Bot b : bots.values()) {
             Player p = b.player();
             if (p == null) continue;
-            int base = 25 + Math.floorMod(b.name.hashCode() * 31, 60);
+            int base = BotNms.basePing(b.name);
             BotNms.setLatency(p, Math.max(5, base + rnd.nextInt(17) - 8));
         }
     }
@@ -373,8 +373,12 @@ public final class BotManager implements Listener {
         if (last != null && now - last < 20 * 12) return;
         if (!skill.chat || rnd.nextDouble() > 0.45 || !fp.getWorld().equals(at.getWorld())) return;
         lastCalloutChat.put(team, now);
-        String raw = pickFrom(BotChatter.LINES.get(BotChatter.Topic.T_CALLOUT), from);
-        if (raw != null) teamMessage(fp, raw.replace("{n}", direction(fp.getLocation(), at)));
+        // Доклады повторяются весь матч (не через pickFrom: тот не повторяет фразы до конца игры).
+        String[] ls = BotChatter.LINES.get(BotChatter.Topic.T_CALLOUT);
+        if (ls == null || ls.length == 0) return;
+        String msg = ls[rnd.nextInt(ls.length)].replace("{n}", direction(fp.getLocation(), at));
+        if (skill.chatStyle) msg = ChatStyle.apply(msg, from.skill().style, rnd, false, false);
+        teamMessage(fp, msg);
     }
 
     /** «на северо-востоке, метров 40» - откуда смотрит говорящий. */

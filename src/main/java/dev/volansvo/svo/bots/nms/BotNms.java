@@ -54,6 +54,11 @@ public final class BotNms {
 
     // ---------------------------------------------------------------- жизненный цикл
 
+    /** Обычный пинг этого бота в табе (от ника, 25..84 мс): с ним бот и заходит, а не с 0. */
+    public static int basePing(String name) {
+        return 25 + Math.floorMod(name.hashCode() * 31, 60);
+    }
+
     /** Создаёт бота и вводит его на сервер как обычного игрока (PlayerJoinEvent, таб, трекинг). */
     public static Player spawn(String name, UUID uuid, Location loc, String skinValue, String skinSignature) {
         MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
@@ -70,7 +75,7 @@ public final class BotNms {
 
         BotPlayer bot = new BotPlayer(server, level, profile, info);
         FakeConnection connection = new FakeConnection();
-        server.getPlayerList().placeNewPlayer(connection, bot, new CommonListenerCookie(profile, 0, info, false));
+        server.getPlayerList().placeNewPlayer(connection, bot, new CommonListenerCookie(profile, basePing(name), info, false));
         bot.setClientLoaded(true);
 
         Player bukkit = bot.getBukkitEntity();
@@ -102,7 +107,11 @@ public final class BotNms {
     public static Object rawItem(Player p, int slot) {
         BotPlayer bot = handle(p);
         if (bot == null) return null;
-        try { return bot.getInventory().getItem(slot); } catch (Throwable t) { return null; }
+        try {
+            // Съеденная/потраченная вещь остаётся тем же объектом с количеством 0 - это пустой слот.
+            net.minecraft.world.item.ItemStack s = bot.getInventory().getItem(slot);
+            return s == null || s.isEmpty() ? null : s;
+        } catch (Throwable t) { return null; }
     }
 
     private static java.lang.reflect.Field latencyField;

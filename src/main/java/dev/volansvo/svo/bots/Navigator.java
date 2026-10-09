@@ -184,6 +184,7 @@ public final class Navigator {
         smartFails = 0;
         stuckTicks = 0;
         bestDist = Double.MAX_VALUE;
+        progressDist = Double.MAX_VALUE;
     }
 
     /**
@@ -197,6 +198,7 @@ public final class Navigator {
         if (moved) {
             failures = 0;
             smartFails = 0;
+            progressDist = Double.MAX_VALUE;
             search = null;
             // Цель отошла недалеко (погоня, союзник): идём по старому пути, пока строится новый.
             boolean near = steps != null && smart && goal != null && goal.getWorld().equals(target.getWorld())
@@ -315,7 +317,12 @@ public final class Navigator {
                     // Обрывок пути кончился, а к цели почти не приблизились: это тупик, а не этап
                     // длинной дороги. Раньше такое не считалось неудачей - бот вставал в конце
                     // обрывка и стоял (так боты и не доходили до центра в финале).
-                    if (flatTo(pos) > pathStartDist - 6) failures++;
+                    double left = flatTo(pos);
+                    if (left < progressDist - 8) {
+                        // К цели заметно приблизились: прошлые «тупики» были обходами по дороге.
+                        progressDist = left;
+                        failures = 0;
+                    } else if (search == null && left > pathStartDist - Math.min(6, 0.3 * steps.size())) failures++;
                     steps = null;
                     return m;
                 }
@@ -544,6 +551,7 @@ public final class Navigator {
         reaches = st == PathSearch.State.FOUND;
         smart = true;
         pathStartDist = flatTo(pos);
+        if (progressDist == Double.MAX_VALUE) progressDist = pathStartDist;
         // Пока считали, бот ушёл от стартовой клетки: начинаем с ближайшего узла.
         int near = 0;
         double nd = Double.MAX_VALUE;
@@ -597,6 +605,7 @@ public final class Navigator {
         reaches = r.reaches;
         smart = false;
         pathStartDist = flatTo(p.getLocation());
+        if (progressDist == Double.MAX_VALUE) progressDist = pathStartDist;
         idx = 0;
         // Первый узел - это клетка, где бот уже стоит.
         if (steps.size() > 1) idx = 1;
@@ -859,4 +868,6 @@ public final class Navigator {
 
     /** Насколько далеко была цель, когда строился текущий путь. */
     private double pathStartDist;
+    /** Ближе всего, насколько подошли к нынешней цели по концам обрывков пути. */
+    private double progressDist = Double.MAX_VALUE;
 }

@@ -261,7 +261,10 @@ final class Builder {
                 0.5 + clicked.getModZ() * 0.5);
             if (p.getEyeLocation().distance(hit) > 4.4) continue;
             Location eye = p.getEyeLocation();
-            float yaw = Motor.yawTo(hit.getX() - eye.getX(), hit.getZ() - eye.getZ());
+            // Блок прямо под собой: направление по горизонтали случайное - голову не крутим,
+            // важен только наклон.
+            float yaw = Math.hypot(hit.getX() - eye.getX(), hit.getZ() - eye.getZ()) < 1.0 ? motor.yaw()
+                : Motor.yawTo(hit.getX() - eye.getX(), hit.getZ() - eye.getZ());
             float pitch = Motor.pitchTo(hit.getX() - eye.getX(), hit.getY() - eye.getY(), hit.getZ() - eye.getZ());
             // Сначала доворачиваем голову (не рывком), потом жмём.
             if (!motor.aim(p, yaw, pitch, 9f)) { turning = true; return false; }
@@ -320,7 +323,8 @@ final class Builder {
         return n;
     }
 
-    private int nextLadderPlace;
+    private int nextLadderPlace, ladderTries;
+    private long ladderCell = Long.MIN_VALUE;
 
     /**
      * Подъём по стене на лестницах: (dx,dz) - направление на стену, topFeetY - на какую высоту
@@ -350,15 +354,23 @@ final class Builder {
             if (!cell.getType().isAir() && !cell.isReplaceable()) return false; // клетка занята - не поставить
             int slot = ladderSlot(p);
             if (slot < 0) return climbing; // лестницы кончились: долезть по поставленным
-            double cx = x + 0.5 - l.getX(), cz = z + 0.5 - l.getZ();
-            if (!climbing && (Math.abs(cx) > 0.12 || Math.abs(cz) > 0.12)) {
-                // Встаём в середину клетки: прижавшись к стене, лестница не встанет (там тело).
+            // Встаём в середину клетки, чуть отступив от стены: лестница занимает 3/16 блока у
+            // стены, и если тело заходит туда хоть немного, сервер её не ставит.
+            double tx = x + 0.5 - dx * 0.08, tz = z + 0.5 - dz * 0.08;
+            double cx = tx - l.getX(), cz = tz - l.getZ();
+            double toWall = (l.getX() - (x + 0.5)) * dx + (l.getZ() - (z + 0.5)) * dz;
+            double lateral = Math.abs((l.getX() - (x + 0.5)) * dz) + Math.abs((l.getZ() - (z + 0.5)) * dx);
+            if (!climbing && (toWall > 0.0 || toWall < -0.18 || lateral > 0.15)) {
                 motor.drive(p, cx, cz, 0.25, 0f, false, false);
                 return true;
             }
             BotNms.input(p, 0f, 0f, false);
             if (now < nextLadderPlace) return true;
             nextLadderPlace = now + 4;
+            // Кликнули несколько раз, а лестницы нет (не даёт сервер или плагин) - бросаем.
+            long k = key(cell);
+            if (k != ladderCell) { ladderCell = k; ladderTries = 0; }
+            if (++ladderTries > 6) return false;
             if (!useOnFace(p, wall, face, slot) && !turning) return false;
             return true;
         }

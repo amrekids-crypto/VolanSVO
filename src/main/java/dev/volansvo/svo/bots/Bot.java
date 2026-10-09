@@ -7267,7 +7267,10 @@ public final class Bot {
         for (int[] d : new int[][]{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}}) {
             Block cell = w.getBlockAt(l.getBlockX() + d[0], fy, l.getBlockZ() + d[1]);
             Block floor = cell.getRelative(org.bukkit.block.BlockFace.DOWN);
-            if (cell.getType().isAir() && floor.getType().isSolid() && Builder.inZone(cell)) return floor;
+            // Клетка, в которую заходит тело бота, не годится: сервер туда блок не поставит.
+            boolean body = l.getX() + 0.3 > cell.getX() && l.getX() - 0.3 < cell.getX() + 1
+                && l.getZ() + 0.3 > cell.getZ() && l.getZ() - 0.3 < cell.getZ() + 1;
+            if (!body && cell.getType().isAir() && floor.getType().isSolid() && Builder.inZone(cell)) return floor;
         }
         return null;
     }

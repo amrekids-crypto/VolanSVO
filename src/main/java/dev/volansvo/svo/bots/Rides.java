@@ -127,6 +127,7 @@ final class Rides {
         mode = Mode.CAR_PLACE;
         heliMode = false;
         placeOnly = "tank";
+        combatDeploy = true;
         since = now;
         log.accept(name + " ставит танк в бою");
         return true;
@@ -134,6 +135,8 @@ final class Rides {
 
     /** Ставим только этот вид техники (танк в бою), null - любой. */
     private String placeOnly;
+    /** Танк ставится прямо в бою: бой не отменяет установку и посадку (обычную поездку - отменяет). */
+    private boolean combatDeploy;
 
     /** Куда идти пешком (к тросу или к технике), или null. */
     Location walkTarget() {
@@ -156,6 +159,8 @@ final class Rides {
     void reset(Player p) {
         if (p != null && p.isInsideVehicle()) dismount(p);
         mode = Mode.NONE;
+        placeOnly = null;
+        combatDeploy = false;
         carPart = null;
         carId = null;
         knownParts.clear();
@@ -168,7 +173,8 @@ final class Rides {
      * danger - бой, бегство, лечение: тогда ни во что не садимся.
      */
     void plan(Player p, int now, Location travel, boolean danger) {
-        if (danger && (mode == Mode.ZIP_WALK || mode == Mode.CAR_WALK || mode == Mode.CAR_PLACE || mode == Mode.TRAIN_WAIT)
+        if (mode == Mode.NONE || p.isInsideVehicle()) { combatDeploy = false; if (mode == Mode.NONE) placeOnly = null; }
+        if (danger && !combatDeploy && (mode == Mode.ZIP_WALK || mode == Mode.CAR_WALK || mode == Mode.CAR_PLACE || mode == Mode.TRAIN_WAIT)
                 && !joiningAlly) { mode = Mode.NONE; return; }
         if (travel != null && mode == Mode.TRAIN_RIDE) dest = travel.clone();
         trackTrains(p, now);
@@ -798,9 +804,9 @@ final class Rides {
         if (t % 15 != 2) { motor.stop(p); return true; }
         if (placeSlot < 0 || placeSlot >= 36 || vehicleItem(p.getInventory().getItem(placeSlot)) == null)
             placeSlot = placerSlot(p, heliMode ? "heli" : placeOnly);
-        if (placeSlot < 0 || !hold.test(placeSlot)) { mode = Mode.NONE; return false; }
+        if (placeSlot < 0 || !hold.test(placeSlot)) { mode = Mode.NONE; placeOnly = null; return false; }
         Block spot = placeSpot(p);
-        if (spot == null) { mode = Mode.NONE; banPlaceUntil = now + 20 * 30; return false; }
+        if (spot == null) { mode = Mode.NONE; placeOnly = null; banPlaceUntil = now + 20 * 30; return false; }
         Location eye = p.getEyeLocation();
         double cx = spot.getX() + 0.5, cy = spot.getY() + 1.0, cz = spot.getZ() + 0.5;
         // Голову к месту - не рывком (за тик не больше 50 градусов).
