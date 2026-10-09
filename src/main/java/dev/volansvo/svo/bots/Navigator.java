@@ -164,6 +164,12 @@ public final class Navigator {
     }
 
     public Location getGoal() { return goal; }
+
+    /** Ближайшие шаги пути (для отладочной отрисовки). */
+    public List<PathStep> pathAhead(int max) {
+        if (steps == null || idx >= steps.size()) return java.util.Collections.emptyList();
+        return new ArrayList<PathStep>(steps.subList(idx, Math.min(steps.size(), idx + max)));
+    }
     public boolean hasPath() { return steps != null && idx < steps.size(); }
     /** Текущий путь доходит до цели (а не обрывается в ближайшей к ней точке). */
     public boolean reaches() { return steps != null && reaches; }

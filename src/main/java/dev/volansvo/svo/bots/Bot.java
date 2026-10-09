@@ -3,10 +3,20 @@ package dev.volansvo.svo.bots;
 import dev.volansvo.svo.bots.human.Affect;
 import dev.volansvo.svo.bots.human.AimModel;
 import dev.volansvo.svo.bots.human.Timing;
+import dev.volansvo.svo.bots.mind.Belief;
+import dev.volansvo.svo.bots.mind.Blacklist;
+import dev.volansvo.svo.bots.mind.Board;
+import dev.volansvo.svo.bots.mind.Utility;
+import dev.volansvo.svo.bots.nav.Spots;
+import dev.volansvo.svo.bots.mind.Journal;
+import dev.volansvo.svo.bots.mind.Progress;
+import dev.volansvo.svo.bots.mind.Search;
+import dev.volansvo.svo.bots.mind.Tactics;
 import dev.volansvo.svo.bots.nms.BotNms;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.Particle;
 import org.bukkit.World;
 import org.bukkit.WorldBorder;
 import org.bukkit.attribute.Attribute;
@@ -63,6 +73,38 @@ public final class Bot {
         /** Где цель была в последние 8 тиков, пока бот её видел. */
         final double[] hx = new double[8], hy = new double[8], hz = new double[8];
         final int[] ht = {-1, -1, -1, -1, -1, -1, -1, -1};
+        /** Откуда самое надёжное сведение о цели и когда оно получено. */
+        Belief.Source source = Belief.Source.SEEN;
+        int confTick;
+        /** Погрешность запомненного места (блоки) и когда место уточняли в последний раз. */
+        double r0 = 0.5;
+        int posTick;
+        /** С какой скоростью цель двигалась, когда её заметили (блоков в секунду). */
+        double pace = Belief.WALK;
+        /**
+         * Что было на цели, когда бот смотрел на неё в последний раз: оружие в руке и броня
+         * видны на модели игрока. gearTick -1 - ещё не разглядел.
+         */
+        int gearTick = -1;
+        double gearWeapon = 0.9, gearArmor;
+        boolean gearMelee = true;
+
+        /** Новое сведение о месте цели: вера растёт, только если источник надёжнее того, что уже знаем. */
+        void learn(Belief.Source s, double radius, int now) {
+            if (s.conf0 >= conf(now)) { source = s; confTick = now; }
+            r0 = radius;
+            posTick = now;
+        }
+
+        /** Насколько бот уверен, что цель там, где он думает. */
+        double conf(int now) {
+            return visible ? 1.0 : Belief.conf(source, now - confTick);
+        }
+
+        /** В каком радиусе от запомненного места цель может быть сейчас. */
+        double radius(int now) {
+            return visible ? 0 : Belief.radius(r0, now - posTick, pace);
+        }
 
         void track(int now, Location l) {
             int i = now & 7;
@@ -150,18 +192,17 @@ public final class Bot {
     // --- изучение неизвестных предметов
     private String learnKey;
     private int learnUntil;
-    private double learnTargetHp;
     private LivingEntity learnTarget;
     private double learnSelfDamage;
-    /** Урон по цели изучения: свой (по событиям) и чужой (его не засчитываем предмету). */
-    private double learnDealt, learnOther;
+    /** Урон по цели изучения: свой (по событиям) и без источника (огонь, урон самого предмета). */
+    private double learnDealt, learnSeen;
 
     private int deaths;
 
     // --- блоки, плагинное оружие, команда
     private final Builder builder;
     private Block minedBlock;
-    private int towerStart, towerBestY, towerBestTick, towerBanUntil;
+    private int towerStart, towerBestY, towerBestTick;
     private Location stillPos;
     private int undergroundSince = -1, nextCaveCheck;
     private boolean caveDigging;
@@ -218,7 +259,7 @@ public final class Bot {
     private final Map<String, Integer> eiDudUntil = new HashMap<String, Integer>();
     private String eiShotKey;
     private int eiShots;
-    private double eiShotTargetHp;
+    private int eiHitTick = -1000;
     private LivingEntity eiShotTarget;
     private int nextShareCheck;
     private Player shareTo;
@@ -236,7 +277,6 @@ public final class Bot {
     private int wardenAngryUntil;
     private int wardenRetryAt;
     private Location airdropPoint;
-    private int airdropBanUntil;
     private int pickupSince;
     private boolean grabbing;       // в бою побежали за оружием/сундуком
     private final Set<UUID> badPickups = new HashSet<UUID>();
@@ -343,14 +383,19 @@ public final class Bot {
         if (src instanceof Player && hooks.sameTeam(id, src.getUniqueId())) return;
         if (isFaction(src)) { avoidFaction(src, now); return; }
         Contact c = contact(src);
-        c.last = src.getLocation();
+        if (!c.visible && me != null && src.getWorld().equals(me.getWorld())) {
+            // По удару понятно, с какой стороны били, но не точное место.
+            double r = 1.5 + src.getLocation().distance(me.getLocation()) * 0.08;
+            c.last = src.getLocation().add(rnd.nextGaussian() * r * 0.5, 0, rnd.nextGaussian() * r * 0.5);
+            c.learn(Belief.Source.DAMAGE, r, now);
+        }
         c.seenTick = now;
         c.attackedMe = true;
         // Человек поворачивается на удар: ставим цель сразу, но с реакцией.
         if (target == null || target.entity != src) {
             Player p = player();
-            if (p != null && p.getLocation().distanceSquared(src.getLocation()) < 30 * 30) setTarget(c);
-            else if (p != null && !p.hasLineOfSight(src)) markDanger(src.getLocation(), 50, now); // невидимый снайпер - в укрытие
+            if (p != null && p.getLocation().distanceSquared(c.last) < 30 * 30) setTarget(c);
+            else if (p != null && !c.visible) markDanger(c.last, 50, now); // невидимый снайпер - в укрытие
         }
     }
 
@@ -361,10 +406,13 @@ public final class Bot {
         Contact c = contact(source);
         Location heard = source.getLocation();
         Player me = player();
-        if (skill.attention && me != null && !c.visible && heard.getWorld().equals(me.getWorld())) {
+        if (!c.visible && me != null && heard.getWorld().equals(me.getWorld())) {
             // По звуку понятно направление, но не точное место.
-            double f = heard.distance(me.getLocation()) * 0.08;
+            double d = heard.distance(me.getLocation());
+            double f = d * 0.08;
             heard.add(rnd.nextGaussian() * f, 0, rnd.nextGaussian() * f);
+            c.learn(Belief.Source.SHOT, Belief.heardRadius(d), now);
+            journal.add(now, Journal.Kind.SENSE, "слышу выстрел: " + source.getName() + " ~" + (int) d + " бл.");
         }
         c.last = heard;
         c.seenTick = now;
@@ -380,12 +428,38 @@ public final class Bot {
      */
     void onCallout(LivingEntity enemy, Location at, int now) {
         if (enemy == null || at == null || enemy.getUniqueId().equals(id)) return;
-        Contact c = contact(enemy);
-        if (c.visible || now - c.seenTick < 10) return; // сам вижу лучше
-        Location l = at.clone().add(rnd.nextGaussian() * 2.5, 0, rnd.nextGaussian() * 2.5);
-        c.last = l;
-        c.seenTick = now;
-        threat().add(l.getX(), l.getZ(), 1.0, now);
+        if (reports.size() >= 8) reports.removeFirst();
+        Report r = new Report();
+        r.enemy = enemy;
+        r.at = at.clone().add(rnd.nextGaussian() * 2.5, 0, rnd.nextGaussian() * 2.5);
+        // Доклад надо сказать и услышать: доходит через полсекунды-полторы.
+        r.due = now + 10 + rnd.nextInt(21);
+        reports.addLast(r);
+    }
+
+    /** Доклад своего о враге, который ещё не дошёл до бота. */
+    private static final class Report {
+        LivingEntity enemy;
+        Location at;
+        int due;
+    }
+
+    private final ArrayDeque<Report> reports = new ArrayDeque<Report>();
+
+    /** Дошедшие доклады: место примерное и чужими глазами, верим им меньше, чем себе. */
+    private void hearReports(Player p, int now) {
+        while (!reports.isEmpty() && now >= reports.peekFirst().due) {
+            Report r = reports.removeFirst();
+            if (r.enemy.isDead() || !r.enemy.isValid() || !r.at.getWorld().equals(p.getWorld())) continue;
+            Contact known = contacts.get(r.enemy.getUniqueId());
+            if (known != null && (known.visible || known.conf(now) >= Belief.Source.CALLOUT.conf0)) continue; // сам знаю лучше
+            Contact c = contact(r.enemy);
+            c.last = r.at;
+            c.seenTick = now;
+            c.learn(Belief.Source.CALLOUT, Belief.Source.CALLOUT.r0, now);
+            threat().add(r.at.getX(), r.at.getZ(), 1.0, now);
+            journal.add(now, Journal.Kind.SENSE, "доклад: " + r.enemy.getName() + " у " + r.at.getBlockX() + "," + r.at.getBlockZ());
+        }
     }
 
     /** Карта угроз отряда (или своя, если бот сам за себя). */
@@ -409,7 +483,14 @@ public final class Bot {
     void onTeammateHurt(LivingEntity attacker, int now) {
         if (attacker == null) return;
         Contact c = contact(attacker);
-        c.last = attacker.getLocation();
+        Player me = player();
+        if (!c.visible && me != null && attacker.getWorld().equals(me.getWorld())) {
+            // Слышно, откуда бьют по своему, но не точное место.
+            double d = attacker.getLocation().distance(me.getLocation());
+            double f = d * 0.08;
+            c.last = attacker.getLocation().add(rnd.nextGaussian() * f, 0, rnd.nextGaussian() * f);
+            c.learn(Belief.Source.SHOT, Belief.heardRadius(d), now);
+        }
         c.seenTick = now;
         c.attackedMe = true;
     }
@@ -426,6 +507,15 @@ public final class Bot {
         zoneSaid = false;
         target = null;
         contacts.clear();
+        reports.clear();
+        stopSearch();
+        progress.reset();
+        spot = null;
+        visitPoint = null;
+        resumeGoal = null;
+        gestureUntil = -1;
+        Board bd = board();
+        if (bd != null) bd.releaseAll(id);
         nav.clear();
         chest = null;
         chestOpenAt = -1;
@@ -502,6 +592,13 @@ public final class Bot {
 
     void onKill(Player victim) {
         affect.kill();
+        int now = mgr.now();
+        lookAroundUntil = now + 60;
+        nextAttn = now + 12;
+        if (skill.voice && rnd.nextDouble() < skill.playful * 0.45) {
+            gestureStart = now + 14 + rnd.nextInt(10);
+            gestureUntil = gestureStart + 6 * (2 + rnd.nextInt(3));
+        }
         if (skill.memory) memory.killed(victim.getName());
         if (target != null && target.entity == victim) target = null;
         contacts.remove(victim.getUniqueId());
@@ -510,18 +607,32 @@ public final class Bot {
     /** Бот попал по кому-то: запоминает, сколько снял. */
     void onDealt(LivingEntity victim, double damage, int now) {
         if (learnKey != null && victim == learnTarget) learnDealt += damage;
+        if (victim == eiShotTarget) eiHitTick = now;
         Contact c = contacts.get(victim.getUniqueId());
         if (c == null) return;
         c.dealt = hurtGuess(c, now) + damage;
         c.dealtTick = now;
     }
 
-    /** Цель, на которой бот изучает предмет, ранил кто-то другой (или что-то другое). */
+    /**
+     * Кого-то ранили. Бот это учитывает, только если сам смотрел на раненого (игрок видит, как
+     * цель краснеет от попаданий) или если урон его собственный.
+     */
     void onTargetHurt(LivingEntity victim, LivingEntity by, double damage) {
+        int now = mgr.now();
+        boolean mine = by != null && by.getUniqueId().equals(id);
+        Contact c = contacts.get(victim.getUniqueId());
+        boolean watched = c != null && c.visible;
+        // Свой урон по игрокам приходит через onDealt; здесь - свой по мобам и чужой на глазах.
+        if (c != null && (mine ? !(victim instanceof Player) : watched)) {
+            c.dealt = hurtGuess(c, now) + damage;
+            c.dealtTick = now;
+        }
+        if (victim == eiShotTarget && (mine || by == null && watched)) eiHitTick = now;
         if (learnKey == null || victim != learnTarget) return;
+        if (mine) { if (!(victim instanceof Player)) learnDealt += damage; }
         // Урон без источника (огонь, урон самого предмета со временем) - может быть от нашего предмета.
-        if (by == null || by.getUniqueId().equals(id)) return;
-        learnOther += damage;
+        else if (by == null && watched) learnSeen += damage;
     }
 
     /** Сколько урона, по памяти бота, ещё «висит» на цели: со временем она отлечивается. */
@@ -529,10 +640,14 @@ public final class Bot {
         return Math.max(0, c.dealt - (now - c.dealtTick) * 0.02);
     }
 
-    /** Здоровье цели, как его может оценить игрок: полное минус то, что сам снял. */
+    /** Здоровье цели, как его может оценить игрок: полное минус то, что снял сам и что сняли на его глазах. */
     private double hpGuess(Contact c, LivingEntity e, int now) {
-        if (!skill.attention || !(e instanceof Player) || c == null) return e.getHealth();
-        return Math.max(1, maxHp(e) - hurtGuess(c, now));
+        return Math.max(1, fullHp(e) - (c == null ? 0 : hurtGuess(c, now)));
+    }
+
+    /** Сколько здоровья у такой цели, когда она цела: у игрока 20, у моба - по его виду. */
+    private static double fullHp(LivingEntity e) {
+        return e instanceof Player ? 20 : maxHp(e);
     }
 
     void killedBy(String killer) {
@@ -701,6 +816,7 @@ public final class Bot {
             teamwork(p, now);
         } catch (Throwable t) { mgr.warn("extras " + name, t); }
         Goal prev = goal;
+        why = null;
         goal = decide(p, now);
         if (goal != prev && calmGoal() && calm(prev)) {
             // Спокойное занятие человек не бросает в ту же секунду: доделывает шаг, потом переключается.
@@ -710,6 +826,31 @@ public final class Bot {
         // Ушли от открытого сундука (бой, другое дело): закрываем его - иначе следующий сундук
         // бот «лутал» бы как уже открытый, не подходя к нему.
         if (chestOpenAt >= 0 && goal != Goal.LOOT && goal != Goal.AIRDROP) closeOpenChest(p);
+        supervise(p, now);
+        if (!search.active() || goal == Goal.CHASE || goal == Goal.HUNT) searchIdleSince = -1;
+        else if (searchIdleSince < 0) searchIdleSince = now;
+        else if (now - searchIdleSince > 60) stopSearch(); // занялись другим - поиск окончен
+        Board bd = board();
+        if (bd != null) {
+            // Сундук, который уже взял свой, оставляем ему.
+            if ((goal == Goal.LOOT || goal == Goal.AIRDROP) && chest != null
+                    && !bd.claim(Blacklist.place("chest", chest[0], chest[1], chest[2]), id, now) && chestOpenAt < 0) {
+                journal.add(now, Journal.Kind.NOTE, "сундук " + chest[0] + "," + chest[1] + "," + chest[2] + " взял свой, ищу другой");
+                chest = null;
+                nav.clear();
+            }
+            // В общем бою первый прикрывает, остальные обходят.
+            if (goal == Goal.FIGHT && target != null && target.entity instanceof Player) {
+                Board.Role r = persona.type == Persona.Archetype.SUPPORT ? Board.Role.SUPPORT
+                    : bd.role(id) == Board.Role.COVER || bd.count(Board.Role.COVER, id) == 0 ? Board.Role.COVER : Board.Role.FLANK;
+                if (bd.role(id) != r) {
+                    bd.role(id, r);
+                    journal.add(now, Journal.Kind.NOTE, "роль в бою: " + r);
+                    if (r == Board.Role.FLANK) talk(p, BotChatter.Topic.T_FLANK, 0.5, 20 * 40, null);
+                }
+            } else if (bd.role(id) != null) bd.role(id, null);
+        }
+        if (now >= nextRules) { nextRules = now + 20; rules(p, now); }
         // В финале логово Жириновского у центра не обходим: туда и надо.
         Warden boss = goal == Goal.WARDEN || finale() ? null : hooks.warden();
         boolean bossHere = boss != null && boss.getWorld().equals(p.getWorld());
@@ -743,6 +884,17 @@ public final class Bot {
         if (goal == Goal.DROP && !dropSaid) { dropSaid = true; talk(p, BotChatter.Topic.DROP, 0.18, 0, null); }
         if (goal == Goal.ZONE && !zoneSaid) { zoneSaid = true; talk(p, BotChatter.Topic.ZONE, 0.12, 0, null); }
         if (goal != lastGoal) {
+            journal.add(now, Journal.Kind.INTENT, lastGoal + " -> " + goal + (why == null ? "" : ": " + why));
+            if (lastGoal != null && (stance(goal) != stance(lastGoal) || (goal == Goal.EVADE) != (lastGoal == Goal.EVADE))) stanceSince = now;
+            // Спокойное дело прервала помеха: запоминаем, чтобы вернуться.
+            if (skill.utility && lastGoal != null && calm(lastGoal) && !calm(goal)
+                    && (lastGoal == Goal.LOOT || lastGoal == Goal.PLAN || lastGoal == Goal.HUNT || lastGoal == Goal.AIRDROP)) {
+                resumeGoal = lastGoal;
+                resumeTick = now;
+            } else if (calm(goal)) {
+                if (resumeGoal == goal && now - resumeTick < 20 * 60) journal.add(now, Journal.Kind.NOTE, "возвращаюсь к прерванному: " + goal);
+                resumeGoal = null;
+            }
             if (lastGoal == Goal.DROP) {
                 landedTick = now;
                 if (skill.memory) memory.landed(p.getLocation().getX(), p.getLocation().getZ());
@@ -832,6 +984,7 @@ public final class Bot {
     }
 
     private void perceive(Player p, int now) {
+        hearReports(p, now);
         Location me = p.getEyeLocation();
         World w = p.getWorld();
         Vector look = me.getDirection();
@@ -890,7 +1043,15 @@ public final class Bot {
             }
             c.last = cur;
             c.seenTick = now;
+            c.pace = e.isSprinting() ? Belief.RUN : c.velocity.lengthSquared() < 0.0004 && !vague ? Belief.STILL : Belief.WALK;
+            // Подсвеченного видно и сквозь стены; шаги - только примерно.
+            if (vague) c.learn(Belief.Source.STEPS, Belief.heardRadius(d), now);
+            else c.learn(Belief.Source.SEEN, Belief.Source.SEEN.r0, now);
             boolean sees = visible || (glowing && d < 60 && p.hasLineOfSight(e));
+            if (sees) {
+                if (c.gearTick < 0) journal.add(now, Journal.Kind.SENSE, "вижу " + e.getName() + " " + (int) d + " бл.");
+                snapshot(c, e, now);
+            }
             if (sees && !c.visible && c == target && c.lostTick >= 0 && now - c.lostTick >= 6) {
                 // Цель скрывалась и вышла снова: человеку нужно время заметить и довести прицел.
                 reactionLeft = Math.max(reactionLeft, react(timing.reacquire()));
@@ -929,6 +1090,8 @@ public final class Bot {
             c.seenTick = now;
             c.visible = p.hasLineOfSight(mob);
             c.attackedMe = true;
+            c.learn(Belief.Source.SEEN, Belief.Source.SEEN.r0, now);
+            if (c.visible) snapshot(c, mob, now);
         }
 
         // Забываем старое и мёртвое.
@@ -942,6 +1105,7 @@ public final class Bot {
         if (target != null && !contacts.containsValue(target)) target = null;
 
         // Выбор цели среди видимых: ближе, слабее, тот кто бьёт меня.
+        int seenNow = 0;
         Contact best = null;
         double bestScore = Double.MAX_VALUE;
         for (Contact c : contacts.values()) {
@@ -950,15 +1114,23 @@ public final class Bot {
             double d = c.last.distance(p.getLocation());
             double s = d;
             if (c.attackedMe && now - lastHurt < 100) s *= 0.5;
-            s *= 0.6 + hpGuess(c, c.entity, now) / Math.max(1, maxHp(c.entity)) * 0.6;
+            s *= 0.6 + hpGuess(c, c.entity, now) / Math.max(1, fullHp(c.entity)) * 0.6;
             // На того, кто уже убивал бота в прошлых матчах, он идёт охотнее.
             if (c.entity instanceof Player) s *= Math.max(0.6, 1.0 - 0.1 * grudge(c.entity.getName()));
+            if (skill.director && human(c.entity)) {
+                // На человека, по которому уже стреляют двое, третий не наваливается; после жаркого боя ему дают передышку.
+                s *= 1.0 + 0.5 * mgr.pace().shooters(c.entity.getUniqueId(), id, now);
+                if (!mgr.pace().huntable(c.entity.getUniqueId()) && !c.attackedMe && d > 25) s *= 2.5;
+            }
+            if (c.visible && c.entity instanceof Player) seenNow++;
             if (!c.visible) s *= 1.8;
             if (c == target) s *= 0.7; // не дёргаемся между целями
             if (s < bestScore) { bestScore = s; best = c; }
         }
         if (best != null && best != target) setTarget(best);
-        if (best == null && target != null && now - target.seenTick > 30) target = null;
+        if (seenNow >= 2 && skill.voice) talk(p, BotChatter.Topic.T_SEE_MANY, 0.4, 20 * 45, null);
+        if (best == null && target != null && now - target.seenTick > 30 && !searching(target)) target = null;
+        if (search.active() && (target == null || !searching(target) || now > searchUntil + 40)) stopSearch();
 
         if (now >= droneScanAt) { droneScanAt = now + 8; scanDrones(p, now); }
 
@@ -1082,8 +1254,11 @@ public final class Bot {
         boolean finaleSkip = t != null && finale() && tDist > 18 && !(t.attackedMe && now - lastHurt < 60)
             && Math.hypot(t.last.getX() - mapCenter(p).getX(), t.last.getZ() - mapCenter(p).getZ()) > 30;
         if (t != null && !finaleSkip && !zoneDoomed(p, t, tDist, now) && (tVisible || now - t.seenTick < 40)) {
-            double ratio = power / Math.max(0.05, enemyPower(t.entity));
+            double ratio = power / Math.max(0.05, enemyPower(t));
             boolean hitRecently = t.attackedMe && now - lastHurt < 60;
+            // Жадный долутывает открытый сундук, пока по нему самому не попали.
+            if (skill.traits && chestOpenAt >= 0 && persona.greed > 0.7 && !hitRecently && tDist > 12 && now - chestOpenAt < 20 * 6
+                    && (goal == Goal.LOOT || goal == Goal.AIRDROP)) { why = "жадность: долутываю под носом у врага"; return goal; }
             boolean armed = bestWeaponFactor(p) > 0.6;
             boolean forced = (hitRecently && tDist < 14) || (tDist < 6 && (armed || tDist < 2.5));
             boolean late = hooks.alivePlayers().size() <= 3 || p.getWorld().getWorldBorder().getSize() < 160 || finale();
@@ -1091,11 +1266,10 @@ public final class Bot {
             if (mob) return (tDist < 20 || t.attackedMe) ? Goal.FIGHT : Goal.EVADE;
             // С пустыми руками в драку не лезем: сначала лут (как сделал бы человек после высадки).
             if (!armed && !forced && !late) {
-                if (tDist < 10 && enemyPower(t.entity) > power) return evade(now, tDist, tVisible);
-            } else if (forced || late || ratio * aggression * affect.aggression()
-                    >= 0.85 / (caution * Affect.livesCaution(hooks.livesLeft(id)))) {
+                if (tDist < 10 && enemyPower(t) > power) return evade(now, tDist, tVisible);
+            } else if (forced || late || wantsFight(p, t, ratio, tDist, hp, tVisible, now)) {
                 if (hp <= 5 && ratio < 1.2 && !late && tDist > 4) return evade(now, tDist, tVisible);
-                return tVisible ? Goal.FIGHT : Goal.CHASE;
+                return tVisible || holdingCover(t, now) ? Goal.FIGHT : Goal.CHASE;
             } else if (tDist < 28 && tVisible) {
                 return evade(now, tDist, tVisible); // вооружён, но враг заметно сильнее - не подставляемся
             }
@@ -1161,12 +1335,15 @@ public final class Bot {
 
         // Погоня за тем, кого только что потеряли из виду (если мы сильнее или он бил нас).
         Contact recent = freshestContact(now, 20 * 12);
-        if (recent != null && power >= 1.0 * caution && (recent.attackedMe || power > 1.4)
+        if (recent != null && power >= 1.0 * caution && (recent.attackedMe || power > 1.4) && huntAllowed(recent, me)
                 && !zoneDoomed(p, recent, recent.last.distance(me), now)) {
             final Contact rc = recent;
             opts.add(new Option(Goal.CHASE, 50 + aggr * 30 + (recent.attackedMe ? 15 : 0) - recent.last.distance(me) * 0.3,
                 () -> setTarget(rc)));
         }
+
+        // Обыскиваем место, где потеряли врага: начали - доводим.
+        if (searching(target)) opts.add(new Option(goal == Goal.HUNT ? Goal.HUNT : Goal.CHASE, 56 + aggr * 20, null));
 
         // Лечение и еда в спокойной обстановке.
         if (hp < 14 && canHeal && hp < maxHp(p) - 6) opts.add(new Option(Goal.HEAL, 62 + (14 - hp) * 4 + persona.caution * 10, null));
@@ -1180,7 +1357,7 @@ public final class Bot {
             if (airpigWeapon(p, pd) != null && p.hasLineOfSight(pig)) {
                 opts.add(new Option(Goal.AIRPIG, 82, null));
             } else if (flat < 220 && insideBorder(p.getWorld(), pl.getX(), pl.getZ(), 6) && !nearWarden(pl.getX(), pl.getZ(), 26)
-                    && now >= airdropBanUntil) {
+                    && !bans.banned("airdrop", now)) {
                 // Ждём под шаром на земле, на своей высоте (не на крыше или кроне над нами).
                 final Location ap = new Location(p.getWorld(), pl.getX(), nearY(p.getWorld(), pl.getBlockX(), pl.getBlockZ(), me.getBlockY()), pl.getZ());
                 opts.add(new Option(Goal.AIRDROP, 46 + persona.greed * 25 + need * 15 - flat * 0.12,
@@ -1241,7 +1418,8 @@ public final class Bot {
         // Сундуки. Чем нужнее снаряжение, тем дальше ищем и тем ценнее сундук.
         double chestRadius = need > 0.6 ? 110 : need > 0.25 ? 72 : 30;
         if (now < lootOrderUntil) chestRadius = 120;                          // приказ «лутать»
-        int[] cur = chest != null && goal == Goal.LOOT && !searched.contains(key(chest)) ? chest : null;
+        boolean wasLooting = goal == Goal.LOOT || skill.utility && resumeGoal == Goal.LOOT && now - resumeTick < 20 * 60 && !calm(goal);
+        int[] cur = chest != null && wasLooting && !searched.contains(key(chest)) ? chest : null;
         int[] alt = findChest(p, chestRadius);
         // Начатый сундук не бросаем ради другого, если тот не вдвое ближе (раньше бот метался
         // между двумя почти равными сундуками).
@@ -1259,10 +1437,12 @@ public final class Bot {
         // Охота на известного врага (видели, слышали, заметили на карте).
         Contact any = freshestContact(now, 20 * 90);
         boolean huntPlan = persona.plan == Persona.Plan.HUNT || persona.plan == Persona.Plan.HOT_DROP || persona.type == Persona.Archetype.HUNTER;
-        if (any != null && (power >= 1.6 || hooks.alivePlayers().size() <= 4 || huntPlan && power >= 1.0)
-                && !zoneDoomed(p, any, any.last.distance(me), now)) {
+        // Любопытный бежит на выстрелы, даже если не собирался воевать.
+        boolean curious = skill.traits && any != null && persona.curiosity > 0.72 && any.source == Belief.Source.SHOT && power >= 0.8;
+        if (any != null && (power >= 1.6 || hooks.alivePlayers().size() <= 4 || huntPlan && power >= 1.0 || curious)
+                && huntAllowed(any, me) && !zoneDoomed(p, any, any.last.distance(me), now)) {
             final Contact ac = any;
-            double u = 28 + aggr * 35 + (lootDone ? 15 : 0) + (huntPlan ? 15 : 0) - any.last.distance(me) * 0.08;
+            double u = 28 + aggr * 35 + (lootDone ? 15 : 0) + (huntPlan ? 15 : 0) - any.last.distance(me) * 0.08 + (curious ? 14 : 0);
             if (persona.plan == Persona.Plan.EDGE || persona.type == Persona.Archetype.SURVIVOR) u -= 22;
             opts.add(new Option(Goal.HUNT, u, () -> setTarget(ac)));
         }
@@ -1271,17 +1451,35 @@ public final class Bot {
         Location pp = planPoint(p, now, lootDone);
         if (pp != null) opts.add(new Option(Goal.PLAN, 26 + (lootDone ? 38 : 8 * (1 - need)) + phaseBonus(), null));
 
+        // Пройти через район, где человеку давно никто не встречался (см. Pace): бегом, не таясь.
+        if (visitPoint != null && (now > visitUntil || !visitPoint.getWorld().equals(p.getWorld())
+                || !insideBorder(p.getWorld(), visitPoint.getX(), visitPoint.getZ(), zoneKeep())
+                || Math.hypot(visitPoint.getX() - me.getX(), visitPoint.getZ() - me.getZ()) < 8)) visitPoint = null;
+        if (visitPoint != null) {
+            final Location vp = at(p.getWorld(), visitPoint.getX(), visitPoint.getZ(), me);
+            opts.add(new Option(Goal.ROAM, 36 + aggr * 12 + (lootDone ? 10 : 0), () -> { roam = vp; roamUntil = visitUntil; roamSprint = true; }));
+        }
+
         opts.add(new Option(Goal.ROAM, 10, null));
 
         Option best = null, now0 = null;
+        boolean resumed = skill.utility && resumeGoal != null && now - resumeTick < 20 * 60 && !calm(goal);
         for (Option o : opts) {
-            if (o.goal == goal) now0 = o;
+            if (now0 == null && (o.goal == goal || resumed && o.goal == resumeGoal)) now0 = o;
             if (best == null || o.u > best.u) best = o;
         }
         Option pick = best;
-        if (now0 != null && now0 != best && calm(goal)) {
+        if (now0 != null && now0 != best && (calm(goal) || resumed)) {
             double keep = 6 + persona.decisiveness * 14 + (now < commitUntil ? 10 + persona.decisiveness * 20 : 0);
             if (best.u < now0.u + keep) pick = now0;
+        }
+        if (skill.utility) {
+            // Что ещё было на выбор: три лучших варианта с оценками.
+            StringBuilder sb = new StringBuilder();
+            List<Option> top = new ArrayList<Option>(opts);
+            top.sort((a, b) -> Double.compare(b.u, a.u));
+            for (int i = 0; i < Math.min(3, top.size()); i++) sb.append(i == 0 ? "" : ", ").append(top.get(i).goal).append(' ').append((int) top.get(i).u);
+            why = sb + (pick != best ? " (держусь начатого)" : "");
         }
         if (pick.goal != goal) commitUntil = now + 40 + (int) (persona.decisiveness * 160) + (int) (persona.patience * 60);
         if (pick.apply != null) pick.apply.run();
@@ -1334,6 +1532,15 @@ public final class Bot {
             motor.stop(p);
             BotNms.sneak(p, true);
             return;
+        }
+        // Убил и рядом тихо: присел-встал над телом.
+        if (now >= gestureStart && now < gestureUntil) {
+            if (target != null && target.visible || now - lastHurt < 20 || !calmGoal()) gestureUntil = -1;
+            else {
+                motor.stop(p);
+                BotNms.sneak(p, ((now - gestureStart) / 3) % 2 == 0 && Items.eiId(p.getInventory().getItemInMainHand()) == null);
+                return;
+            }
         }
         // Крафтим: стоим, смотрим в инвентарь (или на верстак).
         if (now < craftUntil) {
@@ -1404,11 +1611,11 @@ public final class Bot {
 
         // Лезем по стене на лестницах.
         // Бьют на лестнице - не лезем дальше, а отвечаем.
-        if (now < ladderUntil && target != null && target.visible && now - lastHurt < 20) { ladderUntil = -1; ladderBanUntil = now + 20 * 10; }
+        if (now < ladderUntil && target != null && target.visible && now - lastHurt < 20) { ladderUntil = -1; bans.ban("ladder", 20 * 10, now, null); }
         if (now < ladderUntil && goal != Goal.DROP && goal != Goal.DODGE && goal != Goal.EVADE) {
             if (builder.ladderClimb(p, ladderDx, ladderDz, ladderTop, now)) return;
             ladderUntil = -1;
-            if (p.getLocation().getY() < ladderTop - 0.5) ladderBanUntil = now + 20 * 20; // не вышло
+            if (p.getLocation().getY() < ladderTop - 0.5) bans.ban("ladder", 20 * 20, now, null); // не вышло
             if (pitMode && p.getLocation().getY() >= ladderTop - 0.5) stopPit(p, now, 20 * 10);
         }
 
@@ -1511,6 +1718,20 @@ public final class Bot {
                         && now >= busyUntil && Builder.blockCount(p) >= 2) {
                     nextCover = builder.cover(p, target.last) ? now + 20 * 12 : now + 40;
                 }
+                // Сначала за укрытие, потом аптечка: под огнём лечение сбивается. Паникёр лечится где стоит.
+                if (skill.tactics && target != null && now >= busyUntil && target.last.getWorld().equals(loc.getWorld())
+                        && (target.visible || now - target.seenTick < 60) && target.last.distance(loc) < 45
+                        && !(skill.traits && persona.panicky())) {
+                    Tactics.Spot hs = hideSpot(p, now, target);
+                    if (hs != null && now - healRunSince < 70) {
+                        double sx = hs.x - loc.getX(), sz = hs.z - loc.getZ();
+                        if (Math.hypot(sx, sz) > 0.8) { dmx = sx; dmz = sz; directMove = true; break; }
+                    } else if (hs == null && tactics.running() && target.visible) {
+                        Vector away = loc.toVector().subtract(target.last.toVector());
+                        dmx = away.getX(); dmz = away.getZ(); directMove = true;
+                        break;
+                    }
+                }
                 if (!heal(p, now)) goal = Goal.ROAM;
                 if (target != null && target.visible) {
                     // Лечимся на бегу от врага.
@@ -1525,6 +1746,7 @@ public final class Bot {
                 nav.setGoal(safe, 2);
                 m = nav.tick(p, now);
                 if (!m.active) { Vector away = loc.toVector().subtract(from.toVector()); dmx = away.getX(); dmz = away.getZ(); directMove = true; }
+                if (skill.traits && persona.panicky() && p.getHealth() < 9) strafe = ((now / 9) & 1) == 0 ? 0.7f : -0.7f;
                 tryPearlEscape(p, from, now);
                 // Тактик при отходе оставляет мину за собой.
                 if (gadgetSpot == null && now >= nextGadget && persona.gadgets > 0.5 && target != null && target.visible
@@ -1600,6 +1822,29 @@ public final class Bot {
                     nav.clear();
                     break;
                 }
+                // Не знаем толком, где он: обходим места, куда он мог деться, держа их на прицеле.
+                if (skill.search && !target.visible) {
+                    Location sp = searchStep(p, now, target);
+                    if (target == null) break;
+                    if (sp != null) {
+                        prepareWeapon(p, 8);
+                        Location spEye = sp.clone().add(0, 1.5, 0);
+                        if (now < listenUntil) {
+                            // Прислушивается: стоит и водит головой.
+                            Location at = attention(p, now, true);
+                            if (at == null) at = spEye;
+                            motor.turn(p, yawTo(p, at), pitchTo(p, at), Math.min(skill.turnSpeed, 12f));
+                            motor.stop(p);
+                            return;
+                        }
+                        nav.setGoal(sp, 1);
+                        m = nav.tick(p, now);
+                        if (nav.getFailures() >= 2) { search.dropPick(); nav.clear(); }
+                        lookAt = spEye;
+                        sprint = sp.distanceSquared(loc) > 20 * 20; // рядом идём шагом, с оружием наготове
+                        break;
+                    }
+                } else if (search.active()) stopSearch();
                 // Путь к нему есть и мы ещё не дошли - идём по пути; искать обзор, когда пришли или пути нет.
                 boolean pathOn = nav.hasPath() && nav.reaches() && !nav.arrived(p, 2.5);
                 // Только что спрятался за укрытием рядом - закидываем гранатой.
@@ -1610,7 +1855,7 @@ public final class Bot {
                 nav.setGoal(target.last, 2);
                 m = nav.tick(p, now);
                 // Доходим до последнего места, где видели, - дальше ищем вокруг.
-                if (nav.arrived(p, 2.5) && !target.visible && Math.abs(target.last.getY() - loc.getY()) < 1.5) {
+                if (!skill.search && nav.arrived(p, 2.5) && !target.visible && Math.abs(target.last.getY() - loc.getY()) < 1.5) {
                     target.seenTick -= 200;
                 }
                 // Туда не пройти (дерево, обрыв, вода) - бросаем погоню.
@@ -1647,7 +1892,7 @@ public final class Bot {
                     nav.setGoal(airdropPoint, 4);
                     m = nav.tick(p, now);
                     // Под точку падения не пройти - этот аирдроп пропускаем.
-                    if (nav.getFailures() >= 3) { airdropBanUntil = now + 20 * 60; airdropPoint = null; nav.clear(); note(name + " не дойти до аирдропа, бросаю"); }
+                    if (nav.getFailures() >= 3) { bans.ban("airdrop", 20 * 60, now, null); airdropPoint = null; nav.clear(); note(name + " не дойти до аирдропа, бросаю"); }
                     // Ждём на месте - смотрим, где шар (как игрок, задрав голову).
                     ArmorStand pig = hooks.airpig(now);
                     if (pig != null && pig.getWorld().equals(loc.getWorld()) && nav.arrived(p, 5)) lookAt = pig.getLocation().add(0, 1, 0);
@@ -1745,7 +1990,7 @@ public final class Bot {
                 m = nav.tick(p, now);
                 boolean dead = (!m.active || !nav.hasPath() || !nav.reaches()) && nav.getFailures() >= 2;
                 if (dead && cd >= 4 && BotNms.onGround(p)) {
-                    if (Builder.blockCount(p) < 10 && now >= gatherBanUntil && skill.navPlace && !builder.placeBlocked()) {
+                    if (Builder.blockCount(p) < 10 && !bans.banned("gather", now) && skill.navPlace && !builder.placeBlocked()) {
                         startGather(p, 16, now, "к центру зоны");
                         return;
                     }
@@ -1763,7 +2008,7 @@ public final class Bot {
                     planHoldSince = -1;
                     nav.setGoal(pp, 2);
                     m = nav.tick(p, now);
-                    if (nav.getFailures() >= 3) { planPoint = null; planBanUntil = now + 20 * 20; nav.clear(); }
+                    if (nav.getFailures() >= 3) { planPoint = null; bans.ban("plan", 20 * 20, now, null); nav.clear(); }
                     break;
                 }
                 if (planHoldSince < 0) {
@@ -1782,8 +2027,14 @@ public final class Bot {
             case FOLLOW: {
                 Player leader = helpAlly;
                 if (leader == null) break;
-                nav.setGoal(leader.getLocation(), 3);
+                boolean lead = skill.squad && human(leader);
+                nav.setGoal(leader.getLocation(), lead ? 6 : 3);
                 m = nav.tick(p, now);
+                // Рядом с человеком не дышим в затылок и смотрим туда, куда он не смотрит; он стреляет - туда же.
+                if (lead && target == null && leader.getWorld().equals(loc.getWorld()) && leader.getLocation().distance(loc) < 15) {
+                    double a = Math.toRadians(leader.getLocation().getYaw() + (now - mgr.lastShot(leader.getUniqueId()) < 40 ? 0 : 180));
+                    lookAt = p.getEyeLocation().add(-Math.sin(a) * 14, 0, Math.cos(a) * 14);
+                }
                 break;
             }
             case ROAM: default: {
@@ -1805,7 +2056,7 @@ public final class Bot {
         // Спокойно идём - оглядываемся (на звук, туда, где были враги, за спину), как человек.
         if (lookAt == null && skill.attention && target == null
                 && (goal == Goal.LOOT || goal == Goal.ROAM || goal == Goal.PLAN || goal == Goal.AIRDROP || goal == Goal.HUNT)) {
-            lookAt = attention(p, now, false);
+            lookAt = attention(p, now, now < lookAroundUntil);
         }
         // Смотрим на карту: голова опущена к руке, на бегу не спринтуем.
         if (glancing(now)) {
@@ -1935,7 +2186,7 @@ public final class Bot {
             if (fy > towerBestY) { towerBestY = fy; towerBestTick = now; }
             if (now - towerBestTick > 60 || now - towerStart > 20 * 20) {
                 towerTo = Integer.MIN_VALUE;
-                towerBanUntil = now + 20 * 30;
+                bans.ban("tower", 20 * 30, now, null);
                 BotNms.input(p, 0f, 0f, false);
                 abandonGoal(now);
                 return false;
@@ -1990,12 +2241,12 @@ public final class Bot {
                 int wx = Math.abs(gx) >= Math.abs(gz) ? (gx > 0 ? 1 : -1) : 0, wz = wx == 0 ? (gz > 0 ? 1 : -1) : 0;
                 if (startLadder(p, now, wx, wz, goalL.getBlockY())) return true;
             }
-            if (up >= 2 && up <= 12 && flat <= 2.5 && Builder.blockCount(p) < up && now >= towerBanUntil && !builder.placeBlocked()
-                    && now >= gatherBanUntil && gatherGoal()) {
+            if (up >= 2 && up <= 12 && flat <= 2.5 && Builder.blockCount(p) < up && !bans.banned("tower", now) && !builder.placeBlocked()
+                    && !bans.banned("gather", now) && gatherGoal()) {
                 startGather(p, up + 2, now, "столб в " + up);
                 return true;
             }
-            if (up >= 2 && up <= 12 && flat <= 2.5 && Builder.blockCount(p) >= up && now >= towerBanUntil && !builder.placeBlocked()) {
+            if (up >= 2 && up <= 12 && flat <= 2.5 && Builder.blockCount(p) >= up && !bans.banned("tower", now) && !builder.placeBlocked()) {
                 towerTo = goalL.getBlockY();
                 towerStart = now;
                 towerBestY = feet;
@@ -2037,7 +2288,7 @@ public final class Bot {
     // =====================================================================  яма
 
     private boolean pitMode, pitTowerOk, pitKeepUp;
-    private int pitInChecks, pitOutChecks, pitCheckAt, pitUntil, pitBanUntil, pitDx, pitDz;
+    private int pitInChecks, pitOutChecks, pitCheckAt, pitUntil, pitDx, pitDz;
     private int pitTowerTo = Integer.MIN_VALUE, pitTowerBestY, pitTowerBestTick;
 
     /** Сколько твёрдых блоков стоит столбиком в (x,z) от уровня ног fy вверх (до 8). */
@@ -2121,7 +2372,7 @@ public final class Bot {
             }
             return;
         }
-        if (now < pitBanUntil || !BotNms.onGround(p) || p.isInsideVehicle() || rides.active() || BotNms.inWater(p)) return;
+        if (bans.banned("pit", now) || !BotNms.onGround(p) || p.isInsideVehicle() || rides.active() || BotNms.inWater(p)) return;
         if (pitShape(p) == null) { pitInChecks = 0; pitOutChecks = 0; return; }
         pitInChecks++;
         if (goalOutsidePit(p)) pitOutChecks++;
@@ -2151,7 +2402,7 @@ public final class Bot {
         pitInChecks = 0;
         pitOutChecks = 0;
         pitTowerTo = Integer.MIN_VALUE;
-        pitBanUntil = now + ban;
+        bans.ban("pit", ban, now, null);
         nav.clear();
         BotNms.input(p, 0f, 0f, false);
     }
@@ -2214,7 +2465,7 @@ public final class Bot {
     private Leap.Plan leap;
     /** Куда хотим перелететь (план ещё не посчитан: сначала останавливаемся). */
     private Location leapDest;
-    private int leapPhase, leapStart, leapFired, leapBursts, leapPlanAt, leapBanUntil, leapImmuneUntil, leapFails;
+    private int leapPhase, leapStart, leapFired, leapBursts, leapPlanAt, leapImmuneUntil, leapFails;
     /** Тик, в который кто-то из ботов уже просчитывал прыжок: за тик считает один. */
     private static int leapPlanTick = -1;
 
@@ -2238,7 +2489,7 @@ public final class Bot {
      * обход), бот в яме или застрял: если есть крюк-кошка или ранец, просчитываем прыжок и летим.
      */
     private void maybeLeap(Player p, int now) {
-        if (leap != null || leapDest != null || now < leapPlanAt || now < leapBanUntil) return;
+        if (leap != null || leapDest != null || now < leapPlanAt || bans.banned("leap", now)) return;
         leapPlanAt = now + 20;
         if (!BotNms.onGround(p) || BotNms.inWater(p) || p.isInsideVehicle() || rides.active() || builder.isMining()
                 || now < busyUntil || chestOpenAt >= 0 || now < climbUntil || pilot.active() || kamikaze) return;
@@ -2387,9 +2638,9 @@ public final class Bot {
         nav.clear();
         stuckPos = null;
         trapAnchor = null;
-        leapBanUntil = now + (ok ? 30 : 20 * 12);
+        if (ok) bans.hold("leap", 30, now); else bans.ban("leap", 20 * 12, now, "прыжок не вышел");
         if (ok) leapFails = 0;
-        else if (++leapFails >= 2) { leapFails = 0; leapBanUntil = now + 20 * 45; }
+        else if (++leapFails >= 2) { leapFails = 0; bans.ban("leap", 20 * 45, now, null); }
         motor.stop(p);
     }
 
@@ -2750,7 +3001,7 @@ public final class Bot {
 
     // =====================================================================  лестницы, лианы, подмостки
 
-    private int climbX, climbZ, climbBottom, climbTop, climbCheckAt, climbUntil = -1, climbBanUntil;
+    private int climbX, climbZ, climbBottom, climbTop, climbCheckAt, climbUntil = -1;
     private boolean climbUp;
 
     static boolean climbable(Material m) {
@@ -2766,7 +3017,7 @@ public final class Bot {
     private void checkClimb(Player p, int now) {
         if (now < climbCheckAt || now < climbUntil) return;
         climbCheckAt = now + 20;
-        if (now < climbBanUntil || pitMode || now < escapeUntil || p.isInsideVehicle() || rides.active() || !BotNms.onGround(p)) return;
+        if (bans.banned("climb", now) || pitMode || now < escapeUntil || p.isInsideVehicle() || rides.active() || !BotNms.onGround(p)) return;
         switch (goal) {
             case DODGE: case EVADE: case HEAL: case DROP: case NUKE: case CAVE: case HOLD:
                 return;
@@ -2802,7 +3053,7 @@ public final class Bot {
                 }
             }
         }
-        if (!found) { climbBanUntil = now + 20 * 8; return; }
+        if (!found) { bans.ban("climb", 20 * 8, now, null); return; }
         climbUp = up;
         climbUntil = now + 20 * 45;
         nav.clear();
@@ -2812,7 +3063,7 @@ public final class Bot {
 
     private void stopClimb(Player p, int now, int ban) {
         climbUntil = -1;
-        climbBanUntil = now + ban;
+        bans.ban("climb", ban, now, null);
         nav.clear();
         BotNms.sneak(p, false);
     }
@@ -3216,7 +3467,7 @@ public final class Bot {
     // =====================================================================  пояс шахида (камикадзе)
 
     private boolean kamikaze;
-    private int kamikazeUntil, kamikazeBanUntil, kamikazeTapAt = -1, nextHelpShout;
+    private int kamikazeUntil, kamikazeTapAt = -1, nextHelpShout;
 
     private static boolean isVest(ItemStack it) {
         return "suicide_vest".equals(Items.warkitId(it));
@@ -3225,7 +3476,7 @@ public final class Bot {
     /** Пояс шахида MilitaryCraft есть, хп мало, враг-игрок рядом и своих возле него нет. */
     private boolean kamikazeReady(Player p, int now) {
         if (kamikaze) return target != null && target.entity != null && !target.entity.isDead() && now - target.seenTick < 60;
-        if (now < kamikazeBanUntil || p.getHealth() > 8) return false;
+        if (bans.banned("kamikaze", now) || p.getHealth() > 8) return false;
         Contact t = target;
         if (t == null || !t.visible || !(t.entity instanceof Player) || t.entity.isDead()) return false;
         if (t.last.distance(p.getLocation()) > 20) return false;
@@ -3254,7 +3505,7 @@ public final class Bot {
                     break;
                 }
             }
-            if (!isVest(inv.getChestplate())) { kamikazeBanUntil = now + 20 * 30; return false; }
+            if (!isVest(inv.getChestplate())) { bans.ban("kamikaze", 20 * 30, now, null); return false; }
             kamikaze = true;
             kamikazeUntil = now + 20 * 15;
             kamikazeTapAt = -1;
@@ -3289,7 +3540,7 @@ public final class Bot {
     private void stopKamikaze(Player p, int now) {
         kamikaze = false;
         kamikazeTapAt = -1;
-        kamikazeBanUntil = now + 20 * 20;
+        bans.ban("kamikaze", 20 * 20, now, null);
         BotNms.sneak(p, false);
         PlayerInventory inv = p.getInventory();
         if (!isVest(inv.getChestplate())) return;
@@ -3320,7 +3571,7 @@ public final class Bot {
     private Location escapeTo, escapeGoal;
     private Drop escapeDrop;
     private boolean escapeBelow, escapePlatform;
-    private int belowBanUntil, platformChecks, platformCheckAt, platformBanUntil;
+    private int platformChecks, platformCheckAt;
     private int localTryAt;
 
     private void recordCrumb(Player p, int now) {
@@ -3353,7 +3604,7 @@ public final class Bot {
         if (now >= platformCheckAt) {
             platformCheckAt = now + 40;
             // В прыжке (бег прыжками) не сбрасываем: проверяем только стоя на полу.
-            if (now < platformBanUntil) platformChecks = 0;
+            if (bans.banned("platform", now)) platformChecks = 0;
             else if (BotNms.onGround(p)) platformChecks = onFloatingFloor(p) ? platformChecks + 1 : 0;
         }
         boolean platform = platformChecks >= 6;
@@ -3400,7 +3651,7 @@ public final class Bot {
             if (startLocalPath(p, now, "кружит на месте (" + goal + ")")) return;
         }
         // Цель почти под нами (союзник в доме, а мы на крыше), пути вниз нет: спрыгиваем, не ждём.
-        boolean below = now >= belowBanUntil && g.getY() < l.getY() - 3.5
+        boolean below = !bans.banned("below", now) && g.getY() < l.getY() - 3.5
             && Math.hypot(g.getX() - l.getX(), g.getZ() - l.getZ()) < 24 && !(nav.hasPath() && nav.reaches());
         // Прежде чем прыгать вниз - свой короткий путь (присев под низким потолком, ступеньками).
         if (below && now >= localTryAt && now >= wanderUntil && platformChecks == 0) {
@@ -3431,7 +3682,7 @@ public final class Bot {
         escapeBelow = below;
         escapePlatform = platform;
         escapeGoal = g == null ? null : g.clone();
-        if (below) belowBanUntil = now + 20 * 40;
+        if (below) bans.ban("below", 20 * 40, now, null);
         if (platform) platformChecks = 0;
         escapeJump = below || platform || crumbs.size() < 3;
         escapePhaseStart = now;
@@ -3533,7 +3784,7 @@ public final class Bot {
             if (escapeDrop == null) {
                 boolean wasPlatform = escapePlatform;
                 finishEscape();
-                if (wasPlatform) platformBanUntil = now + 20 * 60; // спрыгнуть нельзя - минуту не пробуем
+                if (wasPlatform) bans.ban("platform", 20 * 60, now, null); // спрыгнуть нельзя - минуту не пробуем
                 startLocalPath(p, now, "прыгать некуда");
                 return false;
             }
@@ -3920,6 +4171,11 @@ public final class Bot {
         boolean sneak = false;
 
         if (!visible) {
+            if (holdingCover(t, now)) {
+                // За укрытием: врага не видно, прицел держим там, где он был, и выглядываем.
+                spotStep(p, now, spot, 0f, false);
+                return;
+            }
             boolean pathOn = nav.hasPath() && nav.reaches() && !nav.arrived(p, 2.5);
             if (!pathOn && seekLineOfSight(p, now, e)) return;
             if (target == null) return;
@@ -4009,7 +4265,10 @@ public final class Bot {
         if (longShot && fwd == 0) { side = 0f; sneak = true; }
 
         boolean bump = onGround && BotNms.horizontalCollision(p);
-        if (d > hi + 6) {
+        Tactics.Spot sp = d > hi + 6 || d < Math.max(lo, 4) ? null : combatSpot(p, now, t, seen, (lo + hi) / 2, hi - lo, true);
+        if (sp != null) {
+            spotStep(p, now, sp, side, bump);
+        } else if (d > hi + 6) {
             nav.setGoal(e.getLocation(), 6);
             Navigator.Move m = nav.tick(p, now);
             BotNms.sneak(p, false);
@@ -4026,6 +4285,7 @@ public final class Bot {
 
         if (!ready) return;
         if (reactionLeft > 0) { reactionLeft--; return; }
+        if (!mayFire(e, d, now)) return;
         fireWeapon(p, w, e, aim, d, now);
         tauntOnAttack(p, e);
     }
@@ -4050,7 +4310,7 @@ public final class Bot {
         if (w == Weapon.MELEE) {
             if (p.getAttackCooldown() > 0.9f && (slot >= 0 || punchable(p.getInventory().getItemInMainHand())))
                 BotNms.attack(p, target.entity);
-        } else fireWeapon(p, w, target.entity, aim, d, now);
+        } else if (mayFire(target.entity, d, now)) fireWeapon(p, w, target.entity, aim, d, now);
         return face;
     }
 
@@ -4083,10 +4343,16 @@ public final class Bot {
                 break;
             case AUTO:
                 if (eiEmptyReload(p, Items.Custom.AUTO, now)) break;
+                if (now < burstPauseUntil) break;
                 if (now >= nextFire && aimedAtPoint(p, aim, tol * 1.4f)) {
                     BotNms.useItem(p, false);
                     nextFire = now + 3;
                     eiFired(p, e, now, 25);
+                    // Опытный на дистанции бьёт короткими очередями, новичок держит до конца магазина.
+                    if (skill.traits && d > 14 && skill.tempo < 1.0 && ++burstShots >= 4 + rnd.nextInt(4)) {
+                        burstShots = 0;
+                        burstPauseUntil = now + 6 + rnd.nextInt(6);
+                    }
                 }
                 break;
             case SHOTGUN:
@@ -4143,7 +4409,7 @@ public final class Bot {
         if (!rides.hasCombatVehicle(p)) { nextTankTry = now + 20 * 15; return false; }
         // Хочется не всем и не всегда: технику любит техник, остальные - когда тяжело.
         boolean want = persona.vehicles > 0.5 || p.getHealth() < 14 || rnd.nextDouble() < 0.35
-            || (target != null && enemyPower(target.entity) > myPower(p) * 0.9);
+            || (target != null && enemyPower(target) > myPower(p) * 0.9);
         if (!want) return false;
         if (!rides.deployTank(p, now, enemyAt)) return false;
         motor.stop(p);
@@ -4162,6 +4428,8 @@ public final class Bot {
         if (t.last == null || now < nextThrow || now < busyUntil || d < 6 || d > 22) return false;
         if (t.lostTick < 0 || now - t.lostTick < 10 || now - t.lostTick > 120) return false;
         if (!t.last.getWorld().equals(p.getWorld())) return false;
+        // По памяти кидаем, только пока уверены, что он ещё там.
+        if (t.conf(now) < Belief.FIRE_CONF || t.radius(now) > Belief.FIRE_RADIUS) return false;
         int slot = find(p, Items.Kind.THROW_DAMAGE);
         if (slot < 0) return false;
         if (now >= hiddenThrowCheck) {
@@ -4231,7 +4499,7 @@ public final class Bot {
         // Гранату - в стоящего (или иногда в бегущего); тактик кидает охотнее.
         if (thr && d > 8 && d < 22 && (target != null && target.velocity.lengthSquared() < 0.01 || rnd.nextDouble() < 0.04 + persona.gadgets * 0.2))
             return Weapon.THROW;
-        if (custom >= 0 && d > 3 && d < 20) return Weapon.CUSTOM;
+        if (custom >= 0 && d > 3 && d < 20 && mgr.learning().worksAt(Items.customKey(inv.getItem(custom)), d)) return Weapon.CUSTOM;
         if (sprayer && d < 6.5) return Weapon.SPRAYER;
         if (auto >= 0 && d <= 45) return Weapon.AUTO;
         if (gun) return Weapon.GUN;
@@ -4318,7 +4586,11 @@ public final class Bot {
         spread *= 1.0 + lateral * 3.0;
         if (Math.hypot(p.getVelocity().getX(), p.getVelocity().getZ()) > 0.1) spread *= 1.3;
         if (p.isSneaking()) spread *= 0.7;
-        if (now - lastHurt < 10) spread *= 1.6; // дёрнулся от попадания
+        if (now - lastHurt < 10) spread *= now - lastHurt < 3 ? 1.9 : 1.6; // дёрнулся от попадания
+        // Дальний рывок прицелом неточнее короткой доводки.
+        spread *= 1.0 + Math.min(1.5, 0.04 * Math.abs(Motor.wrap(yawTo(p, e.getEyeLocation()) - motor.yaw())));
+        if (now < handReadyAt + 6) spread *= 1.5; // только что сменил оружие
+        if (tilted()) spread *= 1.15;
         if ((now + thinkPhase) % 6 == 0) {
             aimDriftYaw = (float) (rnd.nextGaussian() * spread);
             aimDriftPitch = (float) (rnd.nextGaussian() * spread * 0.6);
@@ -4342,8 +4614,20 @@ public final class Bot {
         target = c;
         Player me = player();
 
-        // Время реакции: человек не стреляет в ту же миллисекунду, как увидел.
-        reactionLeft = react(timing.reaction());
+        // Время реакции: человек не стреляет в ту же миллисекунду, как увидел. Ждал врага там,
+        // куда смотрел, - быстрее; со спины или по звуку - медленнее; врагов несколько - ещё медленнее.
+        double k = 1.0;
+        int now = mgr.now();
+        if (me != null && c.last != null && c.last.getWorld().equals(me.getWorld())) {
+            float off = Math.abs(Motor.wrap(yawTo(me, c.last.clone().add(0, 1.5, 0)) - motor.yaw()));
+            if (c.visible && off < 20f) k = 0.75;
+            else if (!c.visible || off > 100f) k = 1.3;
+        }
+        int others = 0;
+        for (Contact o : contacts.values()) if (o != c && o.entity instanceof Player && now - o.seenTick < 100) others++;
+        k *= 1.0 + 0.15 * Math.min(3, others);
+        reactionLeft = react((int) Math.round(timing.reaction() * k));
+        if (k > 1.25) journal.add(now, Journal.Kind.NOTE, "застали врасплох: реакция x" + String.format(Locale.ROOT, "%.2f", k));
         motor.acquire();
         nav.clear();
     }
@@ -4466,7 +4750,7 @@ public final class Bot {
 
     // =====================================================================  добыча блоков
 
-    private int gatherNeed, gatherUntil = -1, gatherBanUntil, gatherCheckAt;
+    private int gatherNeed, gatherUntil = -1, gatherCheckAt;
     private Block gatherBlock;
     private final java.util.Set<Long> gatherSkip = new java.util.HashSet<Long>();
     private final java.util.Set<UUID> gatherIgnore = new java.util.HashSet<UUID>();
@@ -4488,7 +4772,7 @@ public final class Bot {
      * заранее считаем высоту и добываем на пару блоков больше.
      */
     private void maybeGather(Player p, int now) {
-        if (now < gatherBanUntil || !gatherGoal() || !skill.navPlace || builder.placeBlocked() || !BotNms.onGround(p)) return;
+        if (bans.banned("gather", now) || !gatherGoal() || !skill.navPlace || builder.placeBlocked() || !BotNms.onGround(p)) return;
         Location g = nav.getGoal();
         Location l = p.getLocation();
         if (g == null || !g.getWorld().equals(l.getWorld())) return;
@@ -4510,7 +4794,7 @@ public final class Bot {
 
     private void stopGather(int now, int ban) {
         gatherUntil = -1;
-        gatherBanUntil = now + ban;
+        bans.ban("gather", ban, now, null);
         gatherBlock = null;
         nav.clear();
     }
@@ -4903,8 +5187,11 @@ public final class Bot {
         int[] best = null;
         double bestScore = Double.MAX_VALUE;
         double margin = borderShrinking ? 30 : 8;
+        Board bd = board();
+        int tick = mgr.now();
         for (int[] c : all) {
             if (searched.contains(key(c))) continue;
+            if (bd != null && bd.taken(Blacklist.place("chest", c[0], c[1], c[2]), id, tick)) continue; // его уже лутает свой
             double dx = c[0] + 0.5 - me.getX(), dy = c[1] - me.getY(), dz = c[2] + 0.5 - me.getZ();
             double d2 = dx * dx + dz * dz;
             if (d2 > radius * radius || Math.abs(dy) > 40) continue;
@@ -5039,6 +5326,7 @@ public final class Bot {
                 if (goal == Goal.FOLLOW && helpAlly != null && helpAlly.getWorld().equals(l.getWorld())
                         && helpAlly.getLocation().distance(l) < 7) break; // стоим рядом с союзником - так и надо
                 note(name + " завис (" + goal + "), бросаю цель");
+                mgr.autoDump(this, "завис " + goal);
                 towerTo = Integer.MIN_VALUE;
                 minedBlock = null;
                 abandonGoal(now);
@@ -5271,14 +5559,8 @@ public final class Bot {
     /** У врага в руках нет ничего дальнобойного. */
     private boolean meleeOnly(LivingEntity e) {
         if (!(e instanceof Player)) return true;
-        ItemStack it = ((Player) e).getInventory().getItemInMainHand();
-        Items.Kind k = Items.kind(it, hooks);
-        switch (k) {
-            case GUN: case BOW: case CROSSBOW: case LAUNCHER: case SPRAYER: case THROW_DAMAGE: case TRIDENT: case CUSTOM:
-                return false;
-            default:
-                return true;
-        }
+        Contact c = contacts.get(e.getUniqueId());
+        return c != null && c.gearTick >= 0 && c.gearMelee;
     }
 
     private int nextRocketHit;
@@ -5398,6 +5680,7 @@ public final class Bot {
                 c.seenTick = now;
                 c.attackedMe = true;
                 c.visible = me.distance(t.getLocation()) < skill.viewDistance && p.hasLineOfSight(t);
+                c.learn(Belief.Source.CALLOUT, 1.0, now); // цель указал командир
                 setTarget(c);
                 return c.visible ? Goal.FIGHT : Goal.CHASE;
             }
@@ -5430,19 +5713,6 @@ public final class Bot {
     private int coverUntil, nextCoverWall, nextTurretScan;
     private UUID tauntedId;
     private final List<Location> turrets = new ArrayList<Location>();
-
-    /** Враг с картой в инвентаре (его стрелка видна на карте). */
-    private Player mapCarrier(Player p, double r) {
-        Player best = null;
-        double bd = r * r;
-        for (Player o : hooks.alivePlayers()) {
-            if (o.getUniqueId().equals(id) || hooks.sameTeam(id, o.getUniqueId()) || !o.getWorld().equals(p.getWorld())) continue;
-            if (o.getGameMode() != GameMode.SURVIVAL || !o.getInventory().contains(Material.FILLED_MAP)) continue;
-            double d = o.getLocation().distanceSquared(p.getLocation());
-            if (d < bd) { bd = d; best = o; }
-        }
-        return best;
-    }
 
     /** Подразнить того, кого только что атаковали (раз на цель). */
     private void tauntOnAttack(Player p, LivingEntity e) {
@@ -5517,7 +5787,7 @@ public final class Bot {
             target = null;
         }
         roam = null;
-        if (goal == Goal.PLAN) { planPoint = null; planBanUntil = now + 20 * 30; }
+        if (goal == Goal.PLAN) { planPoint = null; bans.ban("plan", 20 * 30, now, null); }
         nav.clear();
     }
 
@@ -5863,20 +6133,19 @@ public final class Bot {
         learnKey = Items.customKey(used);
         learnUntil = now + 60;
         learnTarget = e;
-        learnTargetHp = e.getHealth() + e.getAbsorptionAmount();
         learnSelfDamage = 0;
         learnDealt = 0;
-        learnOther = 0;
+        learnSeen = 0;
+        learnDist = e.getWorld().equals(p.getWorld()) ? e.getLocation().distance(p.getLocation()) : 10;
     }
 
+    /** С какой дистанции пробовали предмет. */
+    private double learnDist;
+
     private void finishLearning(Player p) {
-        double dealt = 0;
-        if (learnTarget != null) {
-            double now = learnTarget.isDead() ? 0 : learnTarget.getHealth() + learnTarget.getAbsorptionAmount();
-            // Пока бот пробовал предмет, цель могли бить другие: их урон предмету не засчитываем.
-            dealt = Math.max(learnDealt, Math.max(0, learnTargetHp - now) - learnOther);
-        }
-        mgr.learning().record(learnKey, dealt, learnSelfDamage);
+        // Считаем свой урон и урон без источника по цели, на которую бот смотрел: чужой не в счёт.
+        double dealt = learnDealt + learnSeen;
+        mgr.learning().record(learnKey, learnDist, dealt, learnSelfDamage);
         learnKey = null;
         learnTarget = null;
     }
@@ -5887,16 +6156,32 @@ public final class Bot {
         return power(p, p.getHealth(), armorTotal(p), bestWeaponFactor(p));
     }
 
-    private double enemyPower(LivingEntity e) {
-        if (!(e instanceof Player)) return 0.6;
-        Player o = (Player) e;
-        double hp = hpGuess(contacts.get(o.getUniqueId()), o, mgr.now());
-        ItemStack hand = o.getInventory().getItemInMainHand();
-        double wf;
+    /**
+     * Сила врага, как её может оценить игрок: по тому, что было на нём видно в последний раз
+     * (оружие в руке, броня), и по урону, который ему нанесли на глазах у бота. Врага, которого
+     * бот ещё не разглядел, считает «средним для этой минуты матча».
+     */
+    private double enemyPower(Contact c) {
+        if (c == null || !(c.entity instanceof Player)) return 0.6;
+        double hp = hpGuess(c, c.entity, mgr.now());
+        if (c.gearTick < 0) return Belief.expectedPower(matchFraction()) * hp / 20.0;
+        return power(c.entity, hp, c.gearArmor, c.gearWeapon);
+    }
+
+    /** Запомнить, что видно на враге: оружие в руке и броню. Вызывается, только пока бот его видит. */
+    private void snapshot(Contact c, LivingEntity e, int now) {
+        boolean first = c.gearTick < 0;
+        c.gearTick = now;
+        c.gearArmor = armorTotal(e);
+        if (!(e instanceof Player)) return;
+        ItemStack hand = ((Player) e).getInventory().getItemInMainHand();
         Items.Kind k = Items.kind(hand, hooks);
+        c.gearMelee = !(k == Items.Kind.GUN || k == Items.Kind.BOW || k == Items.Kind.CROSSBOW || k == Items.Kind.LAUNCHER
+            || k == Items.Kind.SPRAYER || k == Items.Kind.THROW_DAMAGE || k == Items.Kind.TRIDENT || k == Items.Kind.CUSTOM);
         Items.Custom ct = k == Items.Kind.CUSTOM ? Items.customType(hand) : Items.Custom.UNKNOWN;
         if (ct == Items.Custom.AUTO) k = Items.Kind.GUN;
         else if (ct == Items.Custom.SHOTGUN) k = Items.Kind.LAUNCHER;
+        double wf;
         switch (k) {
             case GUN: wf = 2.2; break;
             case LAUNCHER: case SPRAYER: wf = 2.0; break;
@@ -5904,7 +6189,14 @@ public final class Bot {
             case MELEE: wf = 1.0 + Items.meleeDps(hand) / 9.0; break;
             default: wf = 0.9; break; // мог убрать оружие в инвентарь - не считаем слабым
         }
-        return power(o, hp, armorTotal(o), wf);
+        // Ствол, который враг показал минуту назад, никуда не делся: помним лучшее из виденного.
+        c.gearWeapon = first ? wf : Math.max(wf, c.gearWeapon);
+    }
+
+    /** Доля матча: 0 - старт, 1 - конец. */
+    private double matchFraction() {
+        double el = hooks.elapsedTicks(), left = hooks.remainingTicks();
+        return el / Math.max(1, el + left);
     }
 
     private static double power(LivingEntity e, double hp, double armor, double weapon) {
@@ -6452,11 +6744,11 @@ public final class Bot {
         eiNeedsReload = true;
         if (Items.eiMag(p.getInventory().getItemInMainHand()) != null) return; // патроны видны в описании
         String k = Items.customKey(p.getInventory().getItemInMainHand());
-        double hpNow = e.getHealth() + e.getAbsorptionAmount();
         if (!k.equals(eiShotKey) || eiShotTarget != e) {
-            eiShotKey = k; eiShotTarget = e; eiShots = 0; eiShotTargetHp = hpNow;
+            eiShotKey = k; eiShotTarget = e; eiShots = 0; eiHitTick = -1000;
         }
-        if (hpNow < eiShotTargetHp - 0.4) { eiShots = 0; eiShotTargetHp = hpNow; return; }
+        // Попадания видно по цели: пока попадаем, ствол исправен.
+        if (now - eiHitTick < 30) { eiShots = 0; return; }
         if (++eiShots >= maxMisses) {
             eiDudUntil.put(k, now + 20 * 60);
             eiShots = 0;
@@ -6468,6 +6760,8 @@ public final class Bot {
 
     private void maybeReloadEi(Player p, int now) {
         if (now < busyUntil || now < eiReloadUntil) return;
+        // Забывчивый вспоминает о магазине через раз: идёт в следующий бой с полупустым.
+        if (skill.traits && persona.forgetful > 0.65 && (target == null || !target.visible) && (now / 600 + (name.hashCode() & 3)) % 3 != 0) return;
         // После своего выстрела смотрим сразу, а подобранные полупустые стволы раз в 3 сек.
         if (!eiNeedsReload && now < nextEiCheck) return;
         nextEiCheck = now + 60;
@@ -6986,11 +7280,372 @@ public final class Bot {
 
     /** Последние причины (застрял, бросил блок, лезет...) - для /asvobot why, пишутся всегда. */
     private final java.util.ArrayDeque<String> notes = new java.util.ArrayDeque<String>();
+    /** Что бот замечал и решал в последнюю минуту (для разбора странностей). */
+    final Journal journal = new Journal();
+    /** Что не вышло и к чему пока не возвращаться: один список вместо таймера на каждое дело. */
+    private final Blacklist bans = new Blacklist();
+    /** Следит, что текущее дело продвигается. */
+    private final Progress progress = new Progress();
+    /** Догадки о том, куда делся потерянный враг. */
+    private final Search search = new Search();
+    private UUID searchFor;
+    private int searchUntil, listenUntil, searchIdleSince = -1;
+    private final WorldProbe probe = new WorldProbe();
+    /** Почему выбрано нынешнее намерение (для журнала). */
+    private String why;
+    /** Выбор позиции в бою и укрытия для лечения. */
+    private final Tactics tactics = new Tactics();
+    private Tactics.Spot spot;
+    private UUID spotFor;
+    private boolean spotHide, queryHide;
+    private int spotUntil, nextSpotQuery, peekAt, peekUntil, healRunSince, flankUntil;
+    /** С какого тика бот держится нынешней линии в бою (дерётся или отходит). */
+    private int stanceSince;
+    /** Прерванное спокойное дело: к нему бот вернётся, когда разберётся с помехой. */
+    private Goal resumeGoal;
+    private int resumeTick;
+    /** Район, через который директор матча просит пройти (там давно тихо). */
+    private Location visitPoint;
+    private int visitUntil;
+    private int burstShots, burstPauseUntil, gestureStart = -1, gestureUntil = -1, lookAroundUntil, tokenSaid;
+
+    /** Мир глазами бота для поиска врага и выбора позиции. */
+    private final class WorldProbe implements Search.Probe, Tactics.Probe {
+        private World w;
+        private int now;
+        private ThreatMap tm;
+        private double margin;
+
+        void at(Player p, int now) {
+            this.w = p.getWorld();
+            this.now = now;
+            this.tm = threat();
+            this.margin = 3 + nav.zoneMargin;
+        }
+
+        @Override public boolean standable(int x, int y, int z) {
+            return w.isChunkLoaded(x >> 4, z >> 4) && walkable(w, x, y, z);
+        }
+
+        @Override public boolean solid(int x, int y, int z) {
+            return w.isChunkLoaded(x >> 4, z >> 4) && wallBlock(w.getBlockAt(x, y, z));
+        }
+
+        @Override public boolean sees(double ex, double ey, double ez, double x, double y, double z) {
+            Vector dir = new Vector(x - ex, y - ey, z - ez);
+            double len = dir.length();
+            if (len < 0.1) return true;
+            return w.rayTraceBlocks(new Location(w, ex, ey, ez), dir.multiply(1.0 / len), len,
+                org.bukkit.FluidCollisionMode.NEVER, true) == null;
+        }
+
+        @Override public boolean inZone(double x, double z) {
+            return insideBorder(w, x, z, margin);
+        }
+
+        @Override public double heat(double x, double z) {
+            return tm.heat(x, z, now);
+        }
+    }
+
+    // =====================================================================  позиция в бою
+
+    private Board board() {
+        int team = hooks.teamIdOf(id);
+        return skill.squad && team >= 0 ? mgr.board(team) : null;
+    }
+
+    private boolean human(Entity e) {
+        return e instanceof Player && !mgr.isBot(e.getUniqueId());
+    }
+
+    /** Бот в тильте: его убили дважды подряд, и он играет злее и небрежнее. */
+    private boolean tilted() {
+        return skill.traits && skill.memory && memory.streak >= 2;
+    }
+
+    /** Сидит за укрытием и выглядывает: врага в этот миг не видно, но бой не кончен. */
+    private boolean holdingCover(Contact t, int now) {
+        return spot != null && !spotHide && now < spotUntil && spot.hasPeek && !spot.fire
+            && t.entity.getUniqueId().equals(spotFor) && now - t.seenTick < 28;
+    }
+
+    /** Глаза других известных врагов (кроме цели): от них позиция тоже должна прикрывать. */
+    private double[] otherEyes(Contact t, int now) {
+        double[] out = new double[6];
+        int n = 0;
+        for (Contact c : contacts.values()) {
+            if (c == t || n >= 6 || !(c.entity instanceof Player) || now - c.seenTick > 100 || c.last == null) continue;
+            out[n++] = c.last.getX(); out[n++] = c.last.getY() + 1.5; out[n++] = c.last.getZ();
+        }
+        return n == 6 ? out : Arrays.copyOf(out, n);
+    }
+
+    private double[] allySpots(Player p) {
+        List<Player> mates = teammates(p);
+        double[] out = new double[mates.size() * 2];
+        int n = 0;
+        for (Player m : mates) {
+            if (m.getLocation().distanceSquared(p.getLocation()) > 24 * 24) continue;
+            out[n++] = m.getLocation().getX(); out[n++] = m.getLocation().getZ();
+        }
+        return n == out.length ? out : Arrays.copyOf(out, n);
+    }
+
+    /**
+     * Где встать в перестрелке. Раз в пару секунд бот оценивает точки вокруг себя и врага
+     * (см. Tactics) и переходит на новую, только если она заметно лучше нынешней.
+     * null - позиции нет, бот воюет по-простому: держит дистанцию и ходит боком.
+     */
+    private Tactics.Spot combatSpot(Player p, int now, Contact t, Location seen, double range, double width, boolean needFire) {
+        if (!skill.tactics || !(t.entity instanceof Player) || p.isInsideVehicle()) return null;
+        UUID tid = t.entity.getUniqueId();
+        if (spot != null && (spotHide || !tid.equals(spotFor) || now > spotUntil)) spot = null;
+        Location loc = p.getLocation();
+        probe.at(p, now);
+        if (tactics.running() && !queryHide) {
+            if (tactics.step(8, probe)) {
+                Tactics.Spot c = tactics.result();
+                boolean same = spot != null && c != null && Math.floor(c.x) == Math.floor(spot.x) && Math.floor(c.z) == Math.floor(spot.z) && c.y == spot.y;
+                if (same) spotUntil = Math.max(spotUntil, now + 60);
+                else if (Tactics.worthMoving(spot, c)) {
+                    spot = c;
+                    spotFor = tid;
+                    spotHide = false;
+                    spotUntil = now + 20 * (6 + rnd.nextInt(5));
+                    peekAt = now + 24;
+                    peekUntil = peekAt + 16 + rnd.nextInt(20);
+                    journal.add(now, Journal.Kind.INTENT, "позиция " + (int) Math.floor(c.x) + "," + (int) c.y + "," + (int) Math.floor(c.z)
+                        + (c.cover == 2 ? " за стеной" : c.cover == 1 ? " за полублоком" : " открытая") + (c.hasPeek && !c.fire ? ", выглядываю" : "")
+                        + String.format(Locale.ROOT, " %.2f: ", c.score) + c.why);
+                }
+            }
+        } else if (now >= nextSpotQuery && BotNms.onGround(p)) {
+            nextSpotQuery = now + 30 + rnd.nextInt(16);
+            Tactics.Need need = new Tactics.Need();
+            need.range = range;
+            need.rangeWidth = Math.max(4, width / 2);
+            need.needFire = needFire;
+            // Осторожный ценит стену, злой - близость; кого бьют сильнее, чем бьёт он, тот ищет укрытие.
+            need.wCover = 0.5 + persona.caution * 0.9 + (now - lastHurt < 60 && p.getHealth() < 12 ? 0.6 : 0);
+            need.wHeat = 0.3 + persona.caution * 0.4;
+            Board bd = board();
+            if (now < flankUntil || bd != null && bd.role(id) == Board.Role.FLANK) need.wFlank = 0.9;
+            double[] extra = null;
+            if (persona.type == Persona.Archetype.MARKSMAN || persona.type == Persona.Archetype.TACTICIAN) {
+                Location hg = highGround(p, loc.getX(), loc.getZ(), 6);
+                if (hg != null && hg.getY() > loc.getY() + 0.9) extra = new double[]{hg.getX(), hg.getY(), hg.getZ()};
+            }
+            queryHide = false;
+            tactics.start(need, loc.getX(), loc.getY(), loc.getZ(), seen.getX(), seen.getY(), seen.getZ(),
+                otherEyes(t, now), allySpots(p), extra, probe);
+        }
+        return spot;
+    }
+
+    /** Ближайшее место, где враг бота не видит: туда уходят лечиться. null - такого рядом нет (или ещё ищем). */
+    private Tactics.Spot hideSpot(Player p, int now, Contact t) {
+        UUID tid = t.entity.getUniqueId();
+        if (spot != null && (!spotHide || !tid.equals(spotFor) || now > spotUntil)) spot = null;
+        if (spot != null) return spot;
+        Location loc = p.getLocation();
+        probe.at(p, now);
+        if (tactics.running() && queryHide) {
+            if (tactics.step(10, probe)) {
+                Tactics.Spot c = tactics.result();
+                if (c != null && c.score > 0) {
+                    spot = c;
+                    spotFor = tid;
+                    spotHide = true;
+                    spotUntil = now + 20 * 8;
+                    healRunSince = now;
+                    journal.add(now, Journal.Kind.INTENT, "лечиться за укрытие " + (int) Math.floor(c.x) + "," + (int) c.y + "," + (int) Math.floor(c.z));
+                } else nextSpotQuery = now + 40;
+            }
+        } else if (now >= nextSpotQuery && BotNms.onGround(p)) {
+            nextSpotQuery = now + 20;
+            Tactics.Need need = new Tactics.Need();
+            need.hide = true;
+            need.needFire = false;
+            need.range = Math.max(6, t.last.distance(loc));
+            need.wFire = 0; need.wRange = 0; need.wFlank = 0;
+            need.wCover = 1.5; need.wPath = 1.4;
+            queryHide = true;
+            tactics.start(need, loc.getX(), loc.getY(), loc.getZ(), t.last.getX(), t.last.getY(), t.last.getZ(),
+                otherEyes(t, now), null, null, probe);
+        }
+        return spot;
+    }
+
+    /** Шаг к выбранной позиции (или к месту, откуда выглядываем из-за неё). */
+    private void spotStep(Player p, int now, Tactics.Spot sp, float side, boolean bump) {
+        Location loc = p.getLocation();
+        boolean peek = sp.hasPeek && !sp.fire;
+        boolean out = peek && now >= peekAt && now < peekUntil;
+        double gx = out ? sp.peekX : sp.x, gz = out ? sp.peekZ : sp.z;
+        double sx = gx - loc.getX(), sz = gz - loc.getZ(), sd = Math.hypot(sx, sz);
+        BotNms.sneak(p, sp.cover == 1 && sd < 1.0 && Items.eiId(p.getInventory().getItemInMainHand()) == null);
+        // За стеной стоим точно на месте; на открытой позиции ходим боком вокруг неё, чтобы не быть мишенью.
+        if (sd > (sp.cover > 0 || out ? 0.45 : 1.4)) driveSafe(p, sx, sz, sd > 1.5 ? 1.0 : 0.6, 0f, bump, false);
+        else driveSafe(p, 0, 0, 0, sp.cover > 0 ? 0f : side, bump && side != 0 && sp.cover == 0, false);
+        // Выглянул на пару выстрелов - обратно за стену.
+        if (peek && now >= peekUntil) {
+            peekAt = now + 8 + rnd.nextInt(11);
+            peekUntil = peekAt + 16 + rnd.nextInt(20);
+        }
+    }
+
+    /**
+     * Можно ли сейчас стрелять по этой цели. По одному человеку одновременно стреляют не больше
+     * двух ботов; остальные в это время обходят и ждут. Себя бот защищает всегда.
+     */
+    private boolean mayFire(LivingEntity e, double d, int now) {
+        if (!skill.director || !human(e)) return true;
+        boolean self = d < 7 || target != null && target.attackedMe && now - lastHurt < 60;
+        if (mgr.pace().mayFire(e.getUniqueId(), id, now, self)) return true;
+        flankUntil = now + 60;
+        if (now - tokenSaid > 200) { tokenSaid = now; journal.add(now, Journal.Kind.NOTE, "по " + e.getName() + " уже стреляют двое: обхожу"); }
+        return false;
+    }
+
+    private boolean huntAllowed(Contact c, Location me) {
+        if (!skill.director || !human(c.entity)) return true;
+        return mgr.pace().huntable(c.entity.getUniqueId()) || c.attackedMe || c.last.distance(me) < 30;
+    }
+
+    /** Директор матча: пройти через район, где человеку давно никто не встречался. */
+    void visit(Location area, int now) {
+        visitPoint = area;
+        visitUntil = now + 20 * 60;
+        journal.add(now, Journal.Kind.NOTE, "иду через район " + area.getBlockX() + "," + area.getBlockZ() + ": там давно тихо");
+    }
+
+    /** Насколько бот годится, чтобы сходить в тот район (меньше нуля - не годится). */
+    double visitScore(Location area) {
+        Player p = player();
+        if (p == null || p.isDead() || target != null || !calmGoal() || visitPoint != null || !p.getWorld().equals(area.getWorld())) return -1;
+        double d = p.getLocation().distance(area);
+        if (d < 45 || d > 260) return -1;
+        double s = 1.0 - d / 400.0 + persona.aggression * 0.5;
+        if (persona.plan == Persona.Plan.HUNT || persona.plan == Persona.Plan.HOT_DROP || persona.type == Persona.Archetype.HUNTER) s += 0.6;
+        if (persona.plan == Persona.Plan.EDGE || persona.type == Persona.Archetype.SURVIVOR) s -= 0.6;
+        return s;
+    }
+
+    /** Кого бот сейчас видит и держит на прицеле (для темпа матча). */
+    UUID fightingWith() {
+        Contact t = target;
+        return t != null && t.visible && (goal == Goal.FIGHT || goal == Goal.CHASE) ? t.entity.getUniqueId() : null;
+    }
+
+    /**
+     * Драться или отходить. Сила против силы - главное соображение, но не единственное: насколько
+     * бот уверен, где враг; та ли дистанция для его оружия; сколько у него здоровья; не идёт ли
+     * рядом чужой бой. Начатой линии бот держится: решительный дольше.
+     */
+    private boolean wantsFight(Player p, Contact t, double ratio, double tDist, double hp, boolean tVisible, int now) {
+        double lives = Affect.livesCaution(hooks.livesLeft(id));
+        if (!skill.utility) return ratio * aggression * affect.aggression() >= 0.85 / (caution * lives);
+        double x = ratio * aggression * affect.aggression() * (tilted() ? 1.2 : 1.0) / (0.85 * caution * lives);
+        double strength = Utility.logistic(x, 1.0, 4.0);
+        double sure = Utility.logistic(t.conf(now), 0.45, 9);
+        double range = 0.35 + 0.65 * Utility.bell(tDist, persona.range, persona.range * 0.9 + 8);
+        double health = 0.3 + 0.7 * Utility.power(hp / 20.0, 0.6);
+        double armed = bestWeaponFactor(p) > 1.5 ? 1.0 : 0.75;
+        Location l = p.getLocation();
+        double quiet = 1.0 / (1.0 + Math.max(0, threat().heat(l.getX(), l.getZ(), now) - 3) * 0.08);
+        double engage = Utility.score(strength, sure, range, health, armed, quiet);
+        // Враг ранен и затих - давим.
+        boolean push = hurtGuess(t, now) >= 6 && now - lastHurt > 40;
+        if (push) engage *= 1.25;
+        double disengage = Utility.score(1 - strength, tVisible && tDist < 28 ? 1.0 : 0.6, 0.4 + 0.6 * Utility.inverse(hp, 6, 20));
+        boolean fighting = goal == Goal.FIGHT || goal == Goal.CHASE, fleeing = goal == Goal.EVADE;
+        double keep = 1 + (0.2 + 0.3 * persona.decisiveness) * Math.max(0, 1 - (now - stanceSince) / (100.0 + 200 * persona.decisiveness));
+        if (fighting) engage *= keep; else if (fleeing) disengage *= keep;
+        boolean fight;
+        // Почти поровну и бот ещё не выбрал линию: как повезёт (один раз - дальше держится выбранного).
+        if (!fighting && !fleeing && Math.abs(engage - disengage) < 0.1 * Math.max(engage, disengage))
+            fight = rnd.nextDouble() * (engage + disengage) < engage;
+        else fight = engage >= disengage;
+        why = String.format(Locale.ROOT, "бой %.2f / отход %.2f (сила %.2f, вера %.2f, дист %.2f, хп %.2f%s%s)",
+            engage, disengage, strength, sure, range, health, push ? ", давлю" : "", tilted() ? ", тильт" : "");
+        if (fight && push && !fighting) talk(p, BotChatter.Topic.T_PUSH, 0.25, 20 * 40, null);
+        return fight;
+    }
+
+    private static boolean stance(Goal g) {
+        return g == Goal.FIGHT || g == Goal.CHASE;
+    }
+
+    // =====================================================================  поиск потерянного врага
+
+    private boolean searching(Contact c) {
+        return c != null && search.active() && c.entity.getUniqueId().equals(searchFor);
+    }
+
+    private void stopSearch() {
+        search.clear();
+        searchFor = null;
+    }
+
+    /**
+     * Врага потеряли. Пока бот уверен, где тот, он идёт прямо туда (null). Дошёл и не нашёл или
+     * сведение устарело - обыскивает места, куда враг мог деться: возвращает очередное место.
+     * Проверил всё или надоело - бросает (target становится null).
+     */
+    private Location searchStep(Player p, int now, Contact c) {
+        Location loc = p.getLocation();
+        UUID tid = c.entity.getUniqueId();
+        if (c.last == null || !c.last.getWorld().equals(loc.getWorld())) return null;
+        probe.at(p, now);
+        if (!searching(c)) {
+            boolean near = Math.hypot(c.last.getX() - loc.getX(), c.last.getZ() - loc.getZ()) < 3 && Math.abs(c.last.getY() - loc.getY()) < 2;
+            if (c.conf(now) >= Belief.CHASE_CONF && !near) return null;
+            if (bans.banned("search@" + tid, now)) { giveUpSearch(c, now, "уже искал"); return null; }
+            search.seed(c.last.getX(), c.last.getY(), c.last.getZ(), c.velocity.getX(), c.velocity.getZ(),
+                Math.max(4, Math.min(14, c.radius(now))), 16, now, rnd, probe);
+            searchFor = tid;
+            searchUntil = now + 20 * (10 + (int) (persona.patience * 14) + 4 * Math.min(3, grudge(c.entity.getName())));
+            journal.add(now, Journal.Kind.INTENT, "ищу " + c.entity.getName() + ": догадок " + search.size()
+                + ", радиус " + (int) c.radius(now) + ", источник " + c.source);
+            talk(p, BotChatter.Topic.T_LOST, 0.3, 20 * 40, null);
+        }
+        search.spread(now, rnd, probe);
+        if ((now & 3) == 0) {
+            Location eye = p.getEyeLocation();
+            Vector dir = eye.getDirection();
+            search.observe(eye.getX(), eye.getY(), eye.getZ(), dir.getX(), dir.getY(), dir.getZ(), Math.toRadians(45), 22, probe);
+        }
+        Search.Guess g = search.active() ? search.best(loc.getX(), loc.getY(), loc.getZ()) : null;
+        if (g != null && Math.hypot(g.x - loc.getX(), g.z - loc.getZ()) < 1.6 && Math.abs(g.y - loc.getY()) < 2) {
+            // Дошли до места, там пусто: постоять, прислушаться, потом дальше.
+            search.drop(g);
+            listenUntil = now + 8 + rnd.nextInt(14);
+            g = search.active() ? search.best(loc.getX(), loc.getY(), loc.getZ()) : null;
+        }
+        // Пока до района далеко, терпение не тратится: искать начинаем на месте.
+        if (g != null && Math.hypot(g.x - loc.getX(), g.z - loc.getZ()) > 25) searchUntil = Math.max(searchUntil, now + 20 * 12);
+        if (g == null || now > searchUntil) {
+            giveUpSearch(c, now, g == null ? "проверил всё" : "надоело искать");
+            return null;
+        }
+        return new Location(loc.getWorld(), g.x, g.y, g.z);
+    }
+
+    private void giveUpSearch(Contact c, int now, String reason) {
+        UUID tid = c.entity.getUniqueId();
+        journal.add(now, Journal.Kind.FAIL, "не нашёл " + c.entity.getName() + ": " + reason);
+        bans.ban("search@" + tid, 20 * 20, now, reason);
+        stopSearch();
+        contacts.remove(tid);
+        if (target == c) target = null;
+        nav.clear();
+    }
 
     // =====================================================================  план на матч
 
     private Location planPoint;
-    private int planPointUntil, planHoldSince = -1, planBanUntil;
+    private int planPointUntil, planHoldSince = -1;
     /** Центр облюбованного для засады места (сундуки вокруг), вокруг него ставим мины. */
     private Location ambushCenter;
 
@@ -7045,7 +7700,9 @@ public final class Bot {
             if (d > 220) continue;
             int n = 0;
             for (int[] o : all) if (Math.abs(o[0] - c[0]) < 20 && Math.abs(o[2] - c[2]) < 20) n++;
-            double score = n * 3 - d * 0.03 - tm.heat(c[0], c[2], now) * 2;
+            Spots sp = mgr.spots();
+            double score = n * 3 - d * 0.03 - tm.heat(c[0], c[2], now) * 2
+                + Math.min(6, sp.count(Spots.LOOT, c[0], c[2]) * 0.5 + sp.count(Spots.FIGHT, c[0], c[2]) * 0.2);
             if (score > bestScore) { bestScore = score; best = c; }
         }
         if (best == null) return ringPoint(p, 0.3);
@@ -7057,7 +7714,7 @@ public final class Bot {
 
     /** Точка плана на матч или null (сейчас плану нечего делать: лутаем и т.п.). */
     private Location planPoint(Player p, int now, boolean lootDone) {
-        if (now < planBanUntil) return null;
+        if (bans.banned("plan", now)) return null;
         World w = p.getWorld();
         if (planPoint != null && (!planPoint.getWorld().equals(w) || now > planPointUntil
                 || !insideBorder(w, planPoint.getX(), planPoint.getZ(), zoneKeep()))) planPoint = null;
@@ -7114,6 +7771,11 @@ public final class Bot {
             }
             case HUNT: {
                 double[] hot = tm.hottest(me.getX(), me.getZ(), 220, 1, now);
+                // Свежих следов нет - идём туда, где на этой карте люди обычно дерутся.
+                if (hot == null && lootDone) {
+                    double[] usual = mgr.spots().busiest(Spots.FIGHT, me.getX(), me.getZ(), 220, 3);
+                    if (usual != null && insideBorder(w, usual[0], usual[1], zoneKeep()) && Math.hypot(usual[0] - me.getX(), usual[1] - me.getZ()) > 25) hot = usual;
+                }
                 pt = hot != null ? at(w, hot[0], hot[1], me) : (lootDone ? ringPoint(p, 0.3) : null);
                 break;
             }
@@ -7241,6 +7903,7 @@ public final class Bot {
             if (c.visible || now - c.seenTick < 60) continue;
             c.last = l;
             c.seenTick = now - 60; // «давно видел»: повод сходить, но не повод стрелять в стену
+            c.learn(Belief.Source.MAP, Belief.Source.MAP.r0, now);
         }
     }
 
@@ -7342,7 +8005,7 @@ public final class Bot {
         dz = dx != 0 ? 0 : Integer.signum(dz);
         if (dx == 0 && dz == 0) return false;
         int need = top - (int) Math.floor(p.getLocation().getY() + 0.01);
-        if (need < 2 || need > 24 || Builder.ladderCount(p) < need - 1 || now < ladderBanUntil) return false;
+        if (need < 2 || need > 24 || Builder.ladderCount(p) < need - 1 || bans.banned("ladder", now)) return false;
         Location l = p.getLocation();
         if (!p.getWorld().getBlockAt(l.getBlockX() + dx, l.getBlockY(), l.getBlockZ() + dz).getType().isSolid()) return false;
         ladderDx = dx;
@@ -7354,7 +8017,6 @@ public final class Bot {
         return true;
     }
 
-    private int ladderBanUntil;
 
     // =====================================================================  мины, турели, растяжки
 
@@ -7525,9 +8187,193 @@ public final class Bot {
         nextInventory = mgr.now();
     }
 
+    // =====================================================================  надзор за делом
+
+    /**
+     * Бот должен приближаться к тому, чем занят. Мерило у каждого дела своё (до сундука, до
+     * предмета, до точки плана). Не приблизился за положенное время и ничем полезным при этом
+     * не занят - дело снимается и откладывается, причина идёт в журнал.
+     */
+    private void supervise(Player p, int now) {
+        Location l = p.getLocation();
+        String task = null;
+        double left = 0;
+        int limit = 20 * 25;
+        switch (goal) {
+            case LOOT: case AIRDROP:
+                if (chest != null) { task = Blacklist.place("chest", chest[0], chest[1], chest[2]); left = chestDist(l, chest); }
+                break;
+            case PICKUP:
+                if (pickup != null && pickup.isValid() && pickup.getWorld().equals(l.getWorld())) {
+                    task = "pickup@" + pickup.getUniqueId();
+                    left = pickup.getLocation().distance(l);
+                }
+                break;
+            case PLAN:
+                if (planPoint != null && planHoldSince < 0 && planPoint.getWorld().equals(l.getWorld())) {
+                    task = Blacklist.place("plan", planPoint.getBlockX(), 0, planPoint.getBlockZ());
+                    left = planPoint.distance(l);
+                }
+                break;
+            case ROAM:
+                if (roam != null && roam.getWorld().equals(l.getWorld())) {
+                    task = Blacklist.place("roam", roam.getBlockX(), 0, roam.getBlockZ());
+                    left = roam.distance(l);
+                }
+                break;
+            case CHASE: case HUNT:
+                if (target != null && !target.visible && !search.active() && target.last != null && target.last.getWorld().equals(l.getWorld())) {
+                    task = "hunt@" + target.entity.getUniqueId();
+                    left = target.last.distance(l);
+                    limit = 20 * 30;
+                }
+                break;
+            case FOLLOW:
+                if (helpAlly != null && helpAlly.getWorld().equals(l.getWorld()) && helpAlly.getLocation().distance(l) > 8) {
+                    task = "follow@" + helpAlly.getUniqueId();
+                    left = helpAlly.getLocation().distance(l);
+                    limit = 20 * 30;
+                }
+                break;
+            case SHARE:
+                if (shareTo != null && shareTo.getWorld().equals(l.getWorld()) && shareTo.getLocation().distance(l) > 4) {
+                    task = "share@" + shareTo.getUniqueId();
+                    left = shareTo.getLocation().distance(l);
+                }
+                break;
+            default:
+        }
+        progress.track(task, left, now);
+        if (task == null) return;
+        if (working(p, now)) { progress.busy(now); return; }
+        if (!progress.stalled(now, limit)) return;
+        int ban = bans.ban(task, 20 * 30, now, "нет продвижения");
+        journal.add(now, Journal.Kind.FAIL, goal + " " + task + ": не приблизился за " + limit / 20 + "с (осталось "
+            + (int) left + " бл.), откладываю на " + ban / 20 + "с");
+        note(name + " не продвигаюсь (" + goal + "), бросаю");
+        mgr.autoDump(this, "нет продвижения " + goal);
+        if (goal == Goal.FOLLOW) helpAlly = null;
+        if (goal == Goal.SHARE) shareTo = null;
+        abandonGoal(now);
+        progress.reset();
+    }
+
+    /** Бот занят тем, что само по себе движение к цели (копает, строит, лутает, лезет, едет). */
+    private boolean working(Player p, int now) {
+        return builder.isMining() || now - lastTunnel < 40 || chestOpenAt >= 0 || now < busyUntil || now < craftUntil
+            || now < typingUntil || now < gatherUntil || now < climbUntil || now < ladderUntil || leap != null || leapDest != null
+            || rides.active() || p.isInsideVehicle() || now < escapeUntil || pitMode || glancing(now) || now < stillUntil
+            || now < wanderUntil || gadgetSpot != null || mirrorAt >= 0;
+    }
+
+    private int nextRules, idleSince, outsideSince = -1, lavaSince = -1, waterSince = -1, unarmedSince = -1;
+    private Location idlePos;
+
+    /**
+     * Раз в секунду: «так быть не должно». Нарушение пишется в журнал, а бот сбрасывает то, на
+     * чём застрял.
+     */
+    private void rules(Player p, int now) {
+        Location l = p.getLocation();
+        // Стоит на месте, хотя дело зовёт идти.
+        if (idlePos == null || !idlePos.getWorld().equals(l.getWorld()) || idlePos.distanceSquared(l) > 2.25) {
+            idlePos = l.clone();
+            idleSince = now;
+        }
+        boolean mayStand = goal == Goal.HOLD || goal == Goal.HEAL || goal == Goal.NUKE || goal == Goal.AIRPIG || goal == Goal.DROP
+            || goal == Goal.WARDEN || goal == Goal.AVOID_WARDEN || goal == Goal.CENTER || goal == Goal.SHARE
+            || goal == Goal.PLAN && planHoldSince >= 0 || goal == Goal.AIRDROP && chest == null
+            || goal == Goal.ZONE && zoneEdge(p) > 15 || goal == Goal.DODGE
+            || goal == Goal.FIGHT && target != null && now - target.seenTick < 40
+            || goal == Goal.FOLLOW && helpAlly != null && helpAlly.getWorld().equals(l.getWorld()) && helpAlly.getLocation().distance(l) < 9
+            || working(p, now) || now < listenUntil || p.isDead();
+        if (mayStand) idleSince = now;
+        else if (now - idleSince > 20 * 8) {
+            idleSince = now;
+            rule(now, "стоит без дела 8с (" + goal + ")");
+            nav.clear();
+            if (calm(goal)) abandonGoal(now);
+        }
+        // За краем зоны и не уходит.
+        if (zoneEdge(p) < 0 && goal != Goal.ZONE && goal != Goal.DROP && goal != Goal.NUKE && goal != Goal.PICK_NUKE) {
+            if (outsideSince < 0) outsideSince = now;
+            else if (now - outsideSince > 60) { outsideSince = -1; rule(now, "за зоной и не уходит (" + goal + ")"); zoneRetreat = true; }
+        } else outsideSince = -1;
+        // В лаве или подолгу в воде.
+        if (l.getBlock().getType() == Material.LAVA) {
+            if (lavaSince < 0) lavaSince = now;
+            else if (now - lavaSince > 40) { lavaSince = -1; rule(now, "в лаве"); nav.clear(); if (calm(goal)) abandonGoal(now); }
+        } else lavaSince = -1;
+        if (BotNms.inWater(p) && goal != Goal.DROP) {
+            if (waterSince < 0) waterSince = now;
+            else if (now - waterSince > 20 * 25) { waterSince = now; rule(now, "в воде 25с (" + goal + ")"); nav.clear(); if (calm(goal)) abandonGoal(now); }
+        } else waterSince = -1;
+        // В бою, оружие есть, а в руке не оно.
+        boolean unarmed = false;
+        if (goal == Goal.FIGHT && target != null && target.visible && now >= busyUntil && bestWeaponFactor(p) > 0.6) {
+            Items.Kind k = Items.kind(p.getInventory().getItemInMainHand(), hooks);
+            unarmed = k == Items.Kind.NONE || k == Items.Kind.FOOD || k == Items.Kind.HEAL || k == Items.Kind.ARMOR;
+        }
+        if (!unarmed) unarmedSince = -1;
+        else if (unarmedSince < 0) unarmedSince = now;
+        else if (now - unarmedSince > 60) { unarmedSince = -1; rule(now, "в бою без оружия в руке"); glanceSlot = -1; nextInventory = now; }
+    }
+
+    private void rule(int now, String what) {
+        journal.add(now, Journal.Kind.RULE, what);
+        note(name + " сбой: " + what);
+        mgr.autoDump(this, what);
+    }
+
+    /** Что бот думает, частицами для админа (/asvobot show): путь, цель, догадки поиска, позиция в бою. */
+    void draw(Player viewer, int now) {
+        Player p = player();
+        if (p == null || !p.getWorld().equals(viewer.getWorld())) return;
+        World w = p.getWorld();
+        java.util.List<dev.volansvo.svo.bots.nav.PathStep> path = nav.pathAhead(40);
+        for (dev.volansvo.svo.bots.nav.PathStep st : path)
+            viewer.spawnParticle(Particle.ELECTRIC_SPARK, st.x + 0.5, st.y + 0.3, st.z + 0.5, 1, 0, 0, 0, 0);
+        Location g = nav.getGoal();
+        if (g != null && g.getWorld().equals(w)) {
+            for (int i = 0; i < 6; i++) viewer.spawnParticle(Particle.END_ROD, g.getX(), g.getY() + 0.5 + i * 0.5, g.getZ(), 1, 0, 0, 0, 0);
+        }
+        for (Search.Guess s : search.guesses())
+            viewer.spawnParticle(Particle.FLAME, s.x, s.y + 1.0, s.z, s.weight > 1.2 ? 3 : 1, 0.05, 0.2, 0.05, 0);
+        for (Tactics.Spot s : tactics.candidates())
+            viewer.spawnParticle(s.score > 0 ? Particle.CRIT : Particle.SMOKE, s.x, s.y + 0.4, s.z, 1, 0, 0, 0, 0);
+        if (spot != null) viewer.spawnParticle(Particle.HAPPY_VILLAGER, spot.x, spot.y + 1.0, spot.z, 4, 0.2, 0.4, 0.2, 0);
+        Contact t = target;
+        if (t != null && t.last != null && t.last.getWorld().equals(w)) {
+            double r = Math.max(0.5, t.radius(now));
+            for (int i = 0; i < 16; i++) {
+                double a = i * Math.PI / 8;
+                viewer.spawnParticle(Particle.SOUL_FIRE_FLAME, t.last.getX() + Math.cos(a) * r, t.last.getY() + 0.2, t.last.getZ() + Math.sin(a) * r, 1, 0, 0, 0, 0);
+            }
+        }
+    }
+
+    /** Полный отчёт о боте для файла: состояние, журнал за минуту, последние заметки. */
+    java.util.List<String> dump() {
+        int now = mgr.now();
+        java.util.List<String> out = new java.util.ArrayList<String>();
+        out.add(debug());
+        Contact t = target;
+        if (t != null) out.add(String.format(Locale.ROOT, "цель %s: видна=%b источник=%s вера=%.2f радиус=%.1f снимок=%s сила~%.2f моя=%.2f",
+            t.entity.getName(), t.visible, t.source, t.conf(now), t.radius(now), t.gearTick < 0 ? "нет" : (now - t.gearTick) / 20 + "с назад",
+            enemyPower(t), player() == null ? 0 : myPower(player())));
+        out.add("контактов " + contacts.size() + ", поиск " + (search.active() ? search.size() + " догадок" : "нет")
+            + ", дело " + (progress.task() == null ? "-" : progress.task() + " без продвижения " + progress.stalledFor(now) / 20 + "с"));
+        out.add("--- журнал");
+        out.addAll(journal.lines(now, 20 * 60));
+        out.add("--- заметки");
+        out.addAll(notes);
+        return out;
+    }
+
     void note(String msg) {
         int now = mgr.now();
         notes.addLast((now / 20) + "с: " + (msg.startsWith(name + " ") ? msg.substring(name.length() + 1) : msg));
+        journal.add(now, Journal.Kind.NOTE, msg.startsWith(name + " ") ? msg.substring(name.length() + 1) : msg);
         while (notes.size() > 8) notes.removeFirst();
         if (skill.debug) mgr.debug(msg);
     }

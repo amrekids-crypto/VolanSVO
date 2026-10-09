@@ -3,6 +3,9 @@ package dev.volansvo.svo.bots;
 import dev.volansvo.svo.VolanSVO;
 import dev.volansvo.svo.bots.human.ChatIntent;
 import dev.volansvo.svo.bots.human.ChatStyle;
+import dev.volansvo.svo.bots.mind.Board;
+import dev.volansvo.svo.bots.mind.Pace;
+import dev.volansvo.svo.bots.nav.Spots;
 import dev.volansvo.svo.bots.nav.Trails;
 import dev.volansvo.svo.bots.nms.BotNms;
 import org.bukkit.Bukkit;
@@ -73,6 +76,11 @@ public final class BotManager implements Listener {
     /** Тропы игроков на текущей карте и имя этой карты. */
     private Trails trails;
     private String trailsKey;
+    /** Привычные места игроков на текущей карте: где стоят, лутают, дерутся. */
+    private Spots spots = new Spots();
+    private final Map<UUID, double[]> stoodAt = new HashMap<UUID, double[]>();
+    /** Журнал игры людей для подгонки ботов (bots.mind.human-log). */
+    private final HumanLog humanLog;
     private BotSkill skill;
     private final Map<UUID, Bot> bots = new LinkedHashMap<UUID, Bot>();
     /** UUID ботов, которые сейчас входят на сервер (PlayerJoinEvent прилетает до регистрации). */
@@ -93,6 +101,7 @@ public final class BotManager implements Listener {
         this.hooks = new VolanHooks(plugin);
         this.learning = new ItemLearning(plugin.getDataFolder());
         this.memory = new BotMemory(plugin.getDataFolder());
+        this.humanLog = new HumanLog(plugin.getDataFolder());
         appendBotsSectionIfMissing();
         reloadSkill();
         loadSkinCache();
@@ -103,6 +112,7 @@ public final class BotManager implements Listener {
         catch (Throwable t) { plugin.getLogger().warning("[Подсветка тиммейтов] не запустилась: " + t); }
         new BukkitRunnable() { @Override public void run() { tickAll(); } }.runTaskTimer(plugin, 1L, 1L);
         new BukkitRunnable() { @Override public void run() { learning.save(); memory.save(); saveTrails(); } }.runTaskTimer(plugin, 6000L, 6000L);
+        new BukkitRunnable() { @Override public void run() { humanLog.flush(); } }.runTaskTimer(plugin, 600L, 600L);
     }
 
     /**
@@ -252,7 +262,10 @@ public final class BotManager implements Listener {
         learning.save();
         memory.save();
         saveTrails();
+        humanLog.flush();
     }
+
+    Spots spots() { return spots; }
 
     // ===================================================================== для ботов
 
@@ -305,9 +318,11 @@ public final class BotManager implements Listener {
             b.cpuNanos += System.nanoTime() - t0;
         }
         if (tick % 10 == 0) recordTrails();
+        if (tick % 4 == 0) humanSight();
+        if (tick % 5 == 0 && !watchers.isEmpty()) drawWatched();
         if (tick % 100 == 0) fakePing();
         secNanos += System.nanoTime() - start;
-        if (tick % 20 == 0) { adaptLoad(); chatterTick(); }
+        if (tick % 20 == 0) { adaptLoad(); chatterTick(); paceTick(); }
     }
 
     /** Хаос поменял инвентари двух игроков: боты среди них забывают, что где лежало. */
@@ -352,6 +367,134 @@ public final class BotManager implements Listener {
         teamThreat.clear();
         soloThreat.clear();
         lastCalloutChat.clear();
+        boards.clear();
+        pace.clear();
+        lastShot.clear();
+    }
+
+    // ===================================================================== отряд: кто чем занят
+
+    private final Map<Integer, Board> boards = new HashMap<Integer, Board>();
+
+    /** Доска отряда: брони сундуков и роли в бою. */
+    Board board(int teamId) {
+        Board b = boards.get(teamId);
+        if (b == null) { b = new Board(); boards.put(teamId, b); }
+        return b;
+    }
+
+    /** Когда игрок последний раз стрелял (тик): боты рядом с командиром смотрят туда же. */
+    private final Map<UUID, Integer> lastShot = new HashMap<UUID, Integer>();
+
+    int lastShot(UUID uid) {
+        Integer t = lastShot.get(uid);
+        return t == null ? -100000 : t;
+    }
+
+    // ===================================================================== темп матча для людей
+
+    private final Pace pace = new Pace();
+
+    Pace pace() { return pace; }
+
+    /**
+     * Раз в секунду: насколько жарко каждому живому человеку. На того, кого бот видит и
+     * собирается бить, давление растёт; заскучавшему подводим одного бота - тот пройдёт через
+     * его район бегом (место примерное, дальше бот ищет сам, как обычно).
+     */
+    private void paceTick() {
+        if (!skill.director || !hooks.gameActive()) return;
+        Set<UUID> pressed = new HashSet<UUID>();
+        for (Bot b : bots.values()) {
+            UUID t = b.fightingWith();
+            if (t != null) pressed.add(t);
+        }
+        for (Player h : hooks.alivePlayers()) {
+            if (isBot(h) || h.getGameMode() != org.bukkit.GameMode.SURVIVAL) continue;
+            UUID hid = h.getUniqueId();
+            if (pressed.contains(hid)) pace.pressure(hid, 0.03, tick);
+            pace.second(hid, tick, 20 * (20 + rnd.nextInt(21)));
+            if (!pace.wantsVisitor(hid, tick)) continue;
+            double a = rnd.nextDouble() * Math.PI * 2, r = 15 + rnd.nextDouble() * 20;
+            Location area = h.getLocation().add(Math.cos(a) * r, 0, Math.sin(a) * r);
+            Bot best = null;
+            double bs = 0;
+            for (Bot b : bots.values()) {
+                if (hooks.sameTeam(b.id, hid)) continue;
+                double s = b.visitScore(area);
+                if (s > bs) { bs = s; best = b; }
+            }
+            if (best != null) best.visit(area, tick);
+        }
+    }
+
+    // ===================================================================== разбор поведения
+
+    private final Map<String, Integer> dumpedAt = new HashMap<String, Integer>();
+    /** Кому из админов показываем частицами, что думает бот: админ -> ник бота. */
+    private final Map<UUID, String> watchers = new HashMap<UUID, String>();
+
+    private Bot byName(String botName) {
+        for (Bot b : bots.values()) if (b.name.equalsIgnoreCase(botName)) return b;
+        return null;
+    }
+
+    /** Сохранить журнал бота в файл. Возвращает файл или null. */
+    public File dump(String botName, String reason) {
+        Bot b = byName(botName);
+        return b == null ? null : dump(b, reason);
+    }
+
+    private File dump(Bot b, String reason) {
+        File dir = new File(plugin.getDataFolder(), "bot_dumps");
+        if (!dir.isDirectory() && !dir.mkdirs()) return null;
+        String stamp = new java.text.SimpleDateFormat("MMdd-HHmmss").format(new java.util.Date());
+        File f = new File(dir, b.name.replaceAll("[^A-Za-z0-9_-]", "_") + "-" + stamp + ".txt");
+        List<String> lines = new ArrayList<String>();
+        lines.add("причина: " + reason + " (тик " + tick + ", " + tick / 20 + "с)");
+        lines.addAll(b.dump());
+        try {
+            java.nio.file.Files.write(f.toPath(), lines, java.nio.charset.StandardCharsets.UTF_8);
+            return f;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Бот завис или нарушил правило: журнал в файл (одного бота - не чаще раза в полминуты). */
+    void autoDump(Bot b, String reason) {
+        if (!skill.autoDump) return;
+        Integer last = dumpedAt.get(b.name);
+        if (last != null && tick - last < 20 * 30) return;
+        dumpedAt.put(b.name, tick);
+        // Старые файлы не копим.
+        File dir = new File(plugin.getDataFolder(), "bot_dumps");
+        File[] old = dir.listFiles();
+        if (old != null && old.length > 200) {
+            Arrays.sort(old, (x, y) -> Long.compare(x.lastModified(), y.lastModified()));
+            for (int i = 0; i < old.length - 150; i++) old[i].delete();
+        }
+        File f = dump(b, reason);
+        if (f != null && skill.debug) plugin.getLogger().info("[Боты] " + b.name + ": " + reason + " -> " + f.getName());
+    }
+
+    /** Показывать админу частицами мысли бота (null - выключить). true - такой бот есть. */
+    public boolean watch(UUID admin, String botName) {
+        if (botName == null) { watchers.remove(admin); return true; }
+        if (byName(botName) == null) return false;
+        watchers.put(admin, botName);
+        return true;
+    }
+
+    private void drawWatched() {
+        Iterator<Map.Entry<UUID, String>> it = watchers.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<UUID, String> e = it.next();
+            Player viewer = Bukkit.getPlayer(e.getKey());
+            Bot b = byName(e.getValue());
+            if (viewer == null || b == null) { it.remove(); continue; }
+            try { b.draw(viewer, tick); } catch (Throwable t) { warn("draw " + b.name, t); it.remove(); }
+        }
     }
 
     /**
@@ -398,8 +541,15 @@ public final class BotManager implements Listener {
         return new File(plugin.getDataFolder(), "bot_trails_" + key + ".dat");
     }
 
+    private File spotsFile(String key) {
+        return new File(plugin.getDataFolder(), "bot_spots_" + key + ".dat");
+    }
+
     private void saveTrails() {
-        if (trails != null && trailsKey != null) trails.save(trailsFile(trailsKey));
+        if (trails != null && trailsKey != null) {
+            trails.save(trailsFile(trailsKey));
+            spots.save(spotsFile(trailsKey));
+        }
     }
 
     /** Дважды в секунду: где сейчас идут живые игроки. По этим клеткам потом водим ботов. */
@@ -410,6 +560,8 @@ public final class BotManager implements Listener {
         if (!key.equals(trailsKey)) {
             saveTrails();
             trails = Trails.load(trailsFile(key));
+            spots = Spots.load(spotsFile(key));
+            stoodAt.clear();
             trailsKey = key;
             Navigator.setTrails(trails);
         }
@@ -418,6 +570,37 @@ public final class BotManager implements Listener {
             if (!((Entity) p).isOnGround()) continue;
             Location l = p.getLocation();
             trails.record(l.getBlockX(), (int) Math.floor(l.getY() + 0.2), l.getBlockZ());
+            // Стоит на месте полсекунды и дольше: здесь люди останавливаются (позиции, углы, укрытия).
+            double[] was = stoodAt.get(p.getUniqueId());
+            if (was != null && Math.abs(was[0] - l.getX()) < 0.3 && Math.abs(was[1] - l.getZ()) < 0.3) spots.record(Spots.STOP, l.getX(), l.getZ());
+            stoodAt.put(p.getUniqueId(), new double[]{l.getX(), l.getZ()});
+        }
+    }
+
+    /** Человек открыл сундук: здесь лутают. */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onContainerOpen(org.bukkit.event.inventory.InventoryOpenEvent e) {
+        if (!(e.getPlayer() instanceof Player) || !(e.getInventory().getHolder() instanceof org.bukkit.block.Container)) return;
+        Player p = (Player) e.getPlayer();
+        if (isBot(p) || !hooks.gameActive() || !hooks.inGame(p.getUniqueId())) return;
+        Location l = p.getLocation();
+        spots.record(Spots.LOOT, l.getX(), l.getZ());
+        if (skill.humanLog) humanLog.lootOpen(p, tick);
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onContainerClose(org.bukkit.event.inventory.InventoryCloseEvent e) {
+        if (!skill.humanLog || !(e.getPlayer() instanceof Player) || isBot((Player) e.getPlayer())) return;
+        humanLog.lootClose((Player) e.getPlayer(), tick);
+    }
+
+    /** Раз в 4 тика: кого видят живые игроки (нужно только журналу для подгонки ботов). */
+    private void humanSight() {
+        if (!skill.humanLog || !hooks.gameActive()) return;
+        List<Player> alive = hooks.alivePlayers();
+        for (Player h : alive) {
+            if (isBot(h) || h.getGameMode() != org.bukkit.GameMode.SURVIVAL) continue;
+            humanLog.sight(h, alive, hooks, tick);
         }
     }
 
@@ -572,6 +755,13 @@ public final class BotManager implements Listener {
         int deadTeam = hooks.teamIdOf(dead.getUniqueId());
         if (deadTeam >= 0 && teamThreat.containsKey(deadTeam))
             teamThreat.get(deadTeam).add(dead.getLocation().getX(), dead.getLocation().getZ(), 4.0, tick);
+        if (skill.director) {
+            if (!isBot(dead)) pace.forget(dead.getUniqueId());
+            if (deadTeam >= 0) {
+                for (Player mate : hooks.alivePlayers())
+                    if (!isBot(mate) && !mate.equals(dead) && hooks.teamIdOf(mate.getUniqueId()) == deadTeam) pace.allyDied(mate.getUniqueId(), tick);
+            }
+        }
         Bot b = bots.get(dead.getUniqueId());
         if (b == null) return;
         if (skill.debug) {
@@ -599,11 +789,21 @@ public final class BotManager implements Listener {
         if (!(e.getEntity() instanceof Player)) return;
         Player victim = (Player) e.getEntity();
         Entity damager = (e instanceof EntityDamageByEntityEvent) ? ((EntityDamageByEntityEvent) e).getDamager() : null;
+        if (skill.director && damager != null && !isBot(victim) && hooks.inGame(victim.getUniqueId()))
+            pace.hurt(victim.getUniqueId(), e.getFinalDamage(), tick);
         Bot b = bots.get(victim.getUniqueId());
         if (b != null) b.onDamaged(damager, e.getFinalDamage(), tick);
         LivingEntity dealer = source(damager);
         Bot db = dealer == null ? null : bots.get(dealer.getUniqueId());
         if (db != null) db.onDealt(victim, e.getFinalDamage(), tick);
+        if (dealer instanceof Player && !dealer.equals(victim) && hooks.inGame(victim.getUniqueId())) {
+            // Где дерутся люди (с ботами или между собой): сюда боты ходят искать бой.
+            if (!isBot(victim)) spots.record(Spots.FIGHT, victim.getLocation().getX(), victim.getLocation().getZ());
+            if (!isBot((Player) dealer)) {
+                spots.record(Spots.FIGHT, dealer.getLocation().getX(), dealer.getLocation().getZ());
+                if (skill.humanLog) humanLog.hit((Player) dealer, victim, e.getFinalDamage(), tick);
+            }
+        }
 
         // Бьют тиммейта бота - бот вступается.
         LivingEntity attacker = source(damager);
@@ -690,6 +890,9 @@ public final class BotManager implements Listener {
     }
 
     private void hear(LivingEntity source, double radius) {
+        lastShot.put(source.getUniqueId(), tick);
+        if (skill.humanLog && source instanceof Player && !isBot((Player) source) && hooks.inGame(source.getUniqueId()))
+            humanLog.shot((Player) source, tick);
         double r2 = radius * radius;
         for (Bot b : bots.values()) {
             Player p = b.player();

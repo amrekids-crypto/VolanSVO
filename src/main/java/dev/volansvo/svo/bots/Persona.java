@@ -73,9 +73,12 @@ final class Persona {
     final double mapUse;
     /** Любимая дистанция боя, блоков. */
     final double range;
+    /** Забывчивость (0..1): идёт в бой с полупустым магазином. */
+    final double forgetful;
 
     private Persona(Archetype type, Plan plan, double aggression, double caution, double decisiveness, double patience,
-                    double greed, double curiosity, double teamSpirit) {
+                    double greed, double curiosity, double teamSpirit, double forgetful) {
+        this.forgetful = forgetful;
         this.type = type;
         this.plan = plan;
         this.aggression = aggression;
@@ -127,7 +130,8 @@ final class Persona {
         double curiosity = clamp(0.5 + r.nextGaussian() * 0.2 + (type == Archetype.HUNTER ? 0.2 : 0));
         double teamSpirit = clamp(0.5 + r.nextGaussian() * 0.2 + (type == Archetype.SUPPORT ? 0.35 : 0));
         Plan plan = pickPlan(type, aggression, caution, matchRnd);
-        return new Persona(type, plan, aggression, caution, decisiveness, patience, greed, curiosity, teamSpirit);
+        double forgetful = clamp(0.4 + r.nextGaussian() * 0.25);
+        return new Persona(type, plan, aggression, caution, decisiveness, patience, greed, curiosity, teamSpirit, forgetful);
     }
 
     private static Archetype pickType(String name, Random r) {
@@ -188,6 +192,9 @@ final class Persona {
 
     /** Множитель осторожности для старой формулы (0.7..1.3, как раньше). */
     double cautionMul() { return 0.7 + caution * 0.6; }
+
+    /** Паникёр: раненым бежит зигзагом и лечится где придётся. */
+    boolean panicky() { return caution > 0.72 && decisiveness < 0.5; }
 
     String describe() {
         return type.title + "/" + plan.title + String.format(Locale.ROOT, " агр%.1f ост%.1f реш%.1f", aggression, caution, decisiveness);

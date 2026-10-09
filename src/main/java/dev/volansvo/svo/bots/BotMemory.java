@@ -33,8 +33,12 @@ public final class BotMemory {
             return v;
         }
 
-        void killed(String victim) { vs(victim)[0]++; }
-        void killedBy(String killer) { vs(killer)[1]++; }
+        /** Сколько раз подряд бота убили, пока он сам никого не убил (тянется из матча в матч). */
+        int streak;
+
+        void killed(String victim) { vs(victim)[0]++; streak = 0; }
+
+        void killedBy(String killer) { vs(killer)[1]++; streak++; }
 
         /** Насколько бот зол на игрока: его победы надо мной минус половина моих над ним. */
         public int grudge(String player) {
@@ -102,6 +106,7 @@ public final class BotMemory {
             if (s == null) continue;
             Record r = new Record();
             r.matches = s.getInt("matches");
+            r.streak = s.getInt("streak");
             r.said.addAll(s.getIntegerList("said"));
             r.hasLanding = s.contains("land.x");
             r.landX = s.getDouble("land.x");
@@ -125,6 +130,7 @@ public final class BotMemory {
             String base = "bots." + e.getKey();
             Record r = e.getValue();
             y.set(base + ".matches", r.matches);
+            if (r.streak > 0) y.set(base + ".streak", r.streak);
             y.set(base + ".said", r.said);
             if (r.hasLanding) {
                 y.set(base + ".land.x", r.landX);

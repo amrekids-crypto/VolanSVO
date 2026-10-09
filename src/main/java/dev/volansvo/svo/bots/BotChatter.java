@@ -21,7 +21,8 @@ final class BotChatter {
         // ---- ответы игрокам
         R_BOT_DENY, R_BOT_ADMIT, R_GG, KILL_AGAIN,
         // ---- командный чат
-        T_LOW_HP, T_SHARE, T_ACK, T_HELP, T_DODGE, T_EVADE, T_RELOAD, T_CAVE, T_WARDEN, T_VEHICLE, T_HEAL, T_LOOT_TO_YOU, T_NO_ITEMS, T_CALLOUT
+        T_LOW_HP, T_SHARE, T_ACK, T_HELP, T_DODGE, T_EVADE, T_RELOAD, T_CAVE, T_WARDEN, T_VEHICLE, T_HEAL, T_LOOT_TO_YOU, T_NO_ITEMS, T_CALLOUT,
+        T_LOST, T_FLANK, T_PUSH, T_SEE_MANY
     }
 
     static final Map<Topic, String[]> LINES = new EnumMap<Topic, String[]>(Topic.class);
@@ -912,6 +913,19 @@ final class BotChatter {
             "Осторожно, {n} чел",
             "{n} враг, аккуратно",
             "Вижу тело {n}",
+        });
+        LINES.put(Topic.T_LOST, new String[]{"Потерял его", "Куда он делся?", "Не вижу его, ищу", "Ушёл за угол, проверяю",
+            "Где-то тут сидит",
+            "Пропал, смотрю вокруг",
+        });
+        LINES.put(Topic.T_FLANK, new String[]{"Обхожу сбоку", "Захожу с фланга, держи его", "Иду в обход", "Зайду сбоку",
+            "Держи его, я обойду",
+        });
+        LINES.put(Topic.T_PUSH, new String[]{"Он ранен, давлю", "Пушу его", "Иду добивать", "Он затих, захожу",
+            "Добиваю",
+        });
+        LINES.put(Topic.T_SEE_MANY, new String[]{"Вижу двоих", "Их тут несколько", "Тут не один", "Аккуратно, их двое",
+            "Двое на меня",
         });
         LINES.put(Topic.T_LOOT_TO_YOU, new String[]{"Нёс тебе подарки", "Смотри, что нашёл!", "Это тебе, командир", "Залутал, раздаю",
             "Держи, командир",

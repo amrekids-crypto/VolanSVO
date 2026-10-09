@@ -56,6 +56,24 @@ public final class BotSkill {
     public boolean lootByOne = true;
     /** Задирать голову при перезарядке плагинного ствола (старое поведение). */
     public boolean reloadLookUp = false;
+    /** Потеряв врага, обыскивать места, куда он мог деться. */
+    public boolean search = true;
+    /** Выбирать позицию в бою: укрытие, линия огня, обход; лечиться за укрытием. */
+    public boolean tactics = true;
+    /** Бой или отход решаются взвешиванием соображений; прерванное дело продолжается. */
+    public boolean utility = true;
+    /** Темп матча для людей: передышка после боя, не больше двух ботов-стрелков на человека. */
+    public boolean director = true;
+    /** Доска отряда: брони сундуков, роли в бою, поведение рядом с командиром. */
+    public boolean squad = true;
+    /** Проговаривать своим, что бот делает и что знает; жесты. */
+    public boolean voice = true;
+    /** Ошибки по характеру: жадность, забывчивость, паника, тильт. */
+    public boolean traits = true;
+    /** При зависании и сбоях сохранять журнал бота в plugins/VolanSVO/bot_dumps. */
+    public boolean autoDump = true;
+    /** Писать в human_log.csv, как играют люди (для подгонки ботов под них). */
+    public boolean humanLog = false;
 
     // ---- личное, задаётся в personal()
     /** Общий темп: больше - медленнее реакции и решения. */
@@ -91,6 +109,8 @@ public final class BotSkill {
         s.navBudgetMs = navBudgetMs; s.sprintJump = sprintJump; s.skillSpread = skillSpread;
         s.humanAim = humanAim; s.attention = attention; s.chatStyle = chatStyle; s.chatCommands = chatCommands;
         s.memory = memory; s.trails = trails; s.mirror = mirror; s.lootByOne = lootByOne; s.reloadLookUp = reloadLookUp;
+        s.search = search; s.tactics = tactics; s.utility = utility; s.director = director; s.squad = squad;
+        s.voice = voice; s.traits = traits; s.autoDump = autoDump; s.humanLog = humanLog;
         java.util.Random r = new java.util.Random(name.hashCode() * 31L + 7);
         double lvl = Math.max(-1.6, Math.min(1.6, r.nextGaussian()));
         String n = name.toLowerCase(java.util.Locale.ROOT);
@@ -143,6 +163,15 @@ public final class BotSkill {
         s.mirror = sec.getBoolean("human.mirror", s.mirror);
         s.lootByOne = sec.getBoolean("human.loot-by-one", s.lootByOne);
         s.reloadLookUp = sec.getBoolean("human.reload-look-up", s.reloadLookUp);
+        s.search = sec.getBoolean("mind.search", s.search);
+        s.tactics = sec.getBoolean("mind.tactics", s.tactics);
+        s.utility = sec.getBoolean("mind.utility", s.utility);
+        s.director = sec.getBoolean("mind.director", s.director);
+        s.squad = sec.getBoolean("mind.squad", s.squad);
+        s.voice = sec.getBoolean("mind.voice", s.voice);
+        s.traits = sec.getBoolean("mind.traits", s.traits);
+        s.autoDump = sec.getBoolean("mind.auto-dump", s.autoDump);
+        s.humanLog = sec.getBoolean("mind.human-log", s.humanLog);
         return s;
     }
 }

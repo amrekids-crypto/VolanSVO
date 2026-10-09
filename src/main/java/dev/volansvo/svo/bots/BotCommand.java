@@ -7,7 +7,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 
-/** /asvobot list | why <ник> | removeall | reload - служебная команда для админа. */
+/** /asvobot list | why <ник> | dump <ник> | show <ник>|off | perf | removeall | reload - служебная команда для админа. */
 public final class BotCommand implements CommandExecutor {
 
     private final VolanSVO plugin;
@@ -37,6 +37,25 @@ public final class BotCommand implements CommandExecutor {
                     sender.sendMessage(ChatColor.GRAY + line);
                 if (notes.isEmpty()) sender.sendMessage(ChatColor.GRAY + "Ничего особенного не было.");
                 for (String n : notes) sender.sendMessage(ChatColor.YELLOW + n);
+                return true;
+            }
+            case "dump": {
+                if (args.length < 2) { sender.sendMessage(ChatColor.RED + "/asvobot dump <ник бота>"); return true; }
+                java.io.File f = bm.dump(args[1], "по команде " + sender.getName());
+                sender.sendMessage(f == null ? ChatColor.RED + "Нет такого бота (или файл не записался)."
+                    : ChatColor.GREEN + "Журнал: plugins/VolanSVO/bot_dumps/" + f.getName());
+                return true;
+            }
+            case "show": {
+                if (!(sender instanceof org.bukkit.entity.Player)) { sender.sendMessage(ChatColor.RED + "Только в игре."); return true; }
+                java.util.UUID me = ((org.bukkit.entity.Player) sender).getUniqueId();
+                if (args.length < 2 || args[1].equalsIgnoreCase("off")) {
+                    bm.watch(me, null);
+                    sender.sendMessage(ChatColor.GRAY + "Показ выключен.");
+                    return true;
+                }
+                if (!bm.watch(me, args[1])) { sender.sendMessage(ChatColor.RED + "Нет такого бота."); return true; }
+                sender.sendMessage(ChatColor.GREEN + "Искры - путь, белый столб - цель, огонь - где ищет врага, зелёное - позиция в бою.");
                 return true;
             }
             case "reload":

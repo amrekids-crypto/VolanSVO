@@ -43,7 +43,7 @@ commands:
     usage: /asvomap warden|spawnbox|border|validate|list|delete
   asvobot:
     description: Боты СВО (список/удалить всех/перечитать настройки)
-    usage: /asvobot [list|why <ник>|removeall|reload]
+    usage: /asvobot [list|why <ник>|dump <ник>|show <ник>|perf|removeall|reload]
   asvominidrone:
     description: Служебная, её вызывает предмет minidrone (полёт дрона-самонаводки)
     usage: /asvominidrone <игрок>
