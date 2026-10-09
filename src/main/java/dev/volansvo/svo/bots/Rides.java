@@ -92,6 +92,52 @@ final class Rides {
 
     boolean active() { return mode != Mode.NONE; }
 
+    /**
+     * Враги, о которых бот знает (видел, слышал, заметил на карте), ближайший в радиусе r.
+     * Раньше вертолёт брал ближайшего врага в 160 блоках даже сквозь горы.
+     */
+    java.util.function.Function<Double, Player> knownEnemy = r -> null;
+
+    /** Как бот любит технику (0..1, из характера): техник садится в неё и на короткий путь. */
+    double vehicleLove = 0.25;
+
+    /** Сидим в своём танке (за рулём). */
+    boolean inTank() { return mode == Mode.CAR_DRIVE && "tank".equals(carKind); }
+
+    /** Задать, куда ехать (в танке - к врагу). */
+    void setDest(Location l) { if (l != null) dest = l.clone(); }
+
+    /** Есть боевая техника (танк, иначе джип/пикап), которую можно поставить. */
+    boolean hasCombatVehicle(Player p) {
+        return placerSlot(p, "tank") >= 0;
+    }
+
+    /**
+     * Поставить свой танк прямо в бою (враг не вплотную): за бронёй и с пушкой бой выгоднее.
+     * true - начали ставить.
+     */
+    boolean deployTank(Player p, int now, Location enemyAt) {
+        if (mode != Mode.NONE || p.isInsideVehicle() || now < banPlaceUntil || !BotNms.onGround(p)) return false;
+        int slot = placerSlot(p, "tank");
+        if (slot < 0) return false;
+        placeSlot = slot;
+        dest = enemyAt == null ? null : enemyAt.clone();
+        knownParts.clear();
+        for (Entity e : p.getNearbyEntities(14, 8, 14)) if (vehicleId(e) != null) knownParts.add(e.getUniqueId());
+        mode = Mode.CAR_PLACE;
+        heliMode = false;
+        placeOnly = "tank";
+        combatDeploy = true;
+        since = now;
+        log.accept(name + " ставит танк в бою");
+        return true;
+    }
+
+    /** Ставим только этот вид техники (танк в бою), null - любой. */
+    private String placeOnly;
+    /** Танк ставится прямо в бою: бой не отменяет установку и посадку (обычную поездку - отменяет). */
+    private boolean combatDeploy;
+
     /** Куда идти пешком (к тросу или к технике), или null. */
     Location walkTarget() {
         if (mode == Mode.ZIP_WALK) return zipStand;
@@ -113,6 +159,8 @@ final class Rides {
     void reset(Player p) {
         if (p != null && p.isInsideVehicle()) dismount(p);
         mode = Mode.NONE;
+        placeOnly = null;
+        combatDeploy = false;
         carPart = null;
         carId = null;
         knownParts.clear();
@@ -125,7 +173,8 @@ final class Rides {
      * danger - бой, бегство, лечение: тогда ни во что не садимся.
      */
     void plan(Player p, int now, Location travel, boolean danger) {
-        if (danger && (mode == Mode.ZIP_WALK || mode == Mode.CAR_WALK || mode == Mode.CAR_PLACE || mode == Mode.TRAIN_WAIT)
+        if (mode == Mode.NONE || p.isInsideVehicle()) { combatDeploy = false; if (mode == Mode.NONE) placeOnly = null; }
+        if (danger && !combatDeploy && (mode == Mode.ZIP_WALK || mode == Mode.CAR_WALK || mode == Mode.CAR_PLACE || mode == Mode.TRAIN_WAIT)
                 && !joiningAlly) { mode = Mode.NONE; return; }
         if (travel != null && mode == Mode.TRAIN_RIDE) dest = travel.clone();
         trackTrains(p, now);
@@ -139,7 +188,7 @@ final class Rides {
 
         // 1б. Есть вертолёт (в инвентаре или пустой рядом), а враг в паре сотен блоков -
         // летим бомбить.
-        if (now >= banHeliUntil && nearestEnemy(p, 160) != null) {
+        if (now >= banHeliUntil && knownEnemy.apply(160.0) != null) {
             Entity heli = nearestEmptyCar(p, 24, "heli");
             if (heli != null) { startCarWalk(heli, true, false, null, null, now); heliMode = true; return; }
             int slot = placerSlot(p, "heli");
@@ -156,7 +205,8 @@ final class Rides {
 
         if (travel == null || !travel.getWorld().equals(p.getWorld())) return;
         double far = flat(p.getLocation(), travel);
-        if (far < 45) return;
+        double carFar = 80 - 35 * vehicleLove; // с какой дальности пути садиться за руль
+        if (far < Math.min(45, carFar)) return;
 
         // 2. Зиплайн по пути.
         if (tryZipline(p, now, travel, far)) return;
@@ -164,7 +214,7 @@ final class Rides {
         // 2б. Поезд идёт в нашу сторону (и не в зону) - ждём его у рельсов впереди и садимся.
         if (far >= 60 && now >= banTrainUntil && tryTrain(p, now, travel)) return;
 
-        if (far < 80 || now < banCarsUntil) return;
+        if (far < carFar || now < banCarsUntil) return;
         // 3. Пустая техника рядом - садимся за руль.
         Entity part = nearestEmptyCar(p, 24, null);
         if (part != null) {
@@ -736,7 +786,7 @@ final class Rides {
     // =====================================================================  техника: установка
 
     private boolean carPlace(Player p, int now) {
-        if (now - since > 60) { mode = Mode.NONE; banPlaceUntil = now + 20 * 90; return false; }
+        if (now - since > 60) { mode = Mode.NONE; placeOnly = null; banPlaceUntil = now + 20 * 90; return false; }
         int t = now - since;
         if (t == 0 || t == 20) {
             // Новая техника появилась - садимся.
@@ -746,19 +796,24 @@ final class Rides {
             if (vehicleId(e) != null && !knownParts.contains(e.getUniqueId())) { fresh = e; break; }
         }
         if (fresh != null) {
+            placeOnly = null;
             Entity part = choosePart(p, vehicleId(fresh), vehicleKind(fresh), false);
             startCarWalk(part != null ? part : fresh, true, false, null, null, now);
             return true;
         }
         if (t % 15 != 2) { motor.stop(p); return true; }
-        if (placeSlot < 0 || placeSlot >= 36 || vehicleItem(p.getInventory().getItem(placeSlot)) == null) placeSlot = placerSlot(p, heliMode ? "heli" : null);
-        if (placeSlot < 0 || !hold.test(placeSlot)) { mode = Mode.NONE; return false; }
+        if (placeSlot < 0 || placeSlot >= 36 || vehicleItem(p.getInventory().getItem(placeSlot)) == null)
+            placeSlot = placerSlot(p, heliMode ? "heli" : placeOnly);
+        if (placeSlot < 0 || !hold.test(placeSlot)) { mode = Mode.NONE; placeOnly = null; return false; }
         Block spot = placeSpot(p);
-        if (spot == null) { mode = Mode.NONE; banPlaceUntil = now + 20 * 30; return false; }
+        if (spot == null) { mode = Mode.NONE; placeOnly = null; banPlaceUntil = now + 20 * 30; return false; }
         Location eye = p.getEyeLocation();
         double cx = spot.getX() + 0.5, cy = spot.getY() + 1.0, cz = spot.getZ() + 0.5;
-        BotNms.look(p, Motor.yawTo(cx - eye.getX(), cz - eye.getZ()), Motor.pitchTo(cx - eye.getX(), cy - eye.getY(), cz - eye.getZ()));
-        motor.sync(p);
+        // Голову к месту - не рывком (за тик не больше 50 градусов).
+        if (!motor.aim(p, Motor.yawTo(cx - eye.getX(), cz - eye.getZ()), Motor.pitchTo(cx - eye.getX(), cy - eye.getY(), cz - eye.getZ()), 6f)) {
+            since--; // ещё доворачиваем - это не попытка
+            return true;
+        }
         BotNms.useItemOn(p, spot.getX(), spot.getY(), spot.getZ(), 1);
         if (mgr.skill().debug) log.accept(name + " ставит технику у " + spot.getX() + "," + spot.getY() + "," + spot.getZ());
         return true;
@@ -831,10 +886,14 @@ final class Rides {
         // Враг рядом: из танка стреляем, из остального выходим драться.
         if (enemy != null && enemy.getWorld().equals(me.getWorld()) && enemy.getLocation().distance(me) < (tank ? 70 : 30)) {
             if (!tank) { BotNms.keys(p, false, false, false, false, false, false); dismount(p); endCar(now, 20 * 20); return true; }
-            BotNms.keys(p, false, false, false, false, false, false);
             Location eye = p.getEyeLocation(), t = enemy.getLocation().add(0, 1, 0);
+            double ed = enemy.getLocation().distance(me);
             motor.turn(p, Motor.yawTo(t.getX() - eye.getX(), t.getZ() - eye.getZ()),
                 Motor.pitchTo(t.getX() - eye.getX(), t.getY() - eye.getY(), t.getZ() - eye.getZ()), 12f);
+            // Дистанция танка: далеко - подъезжаем, вплотную - сдаём назад (в упор пушка мажет
+            // и пехота забирается на броню), в середине стоим и стреляем.
+            boolean fwd = ed > 38 || !p.hasLineOfSight(enemy) && ed > 12, back = ed < 9;
+            BotNms.keys(p, fwd, back, false, false, false, false);
             if (now - lastShot > 30 && p.hasLineOfSight(enemy)) { BotNms.swing(p); lastShot = now; }
             return true;
         }
@@ -928,7 +987,7 @@ final class Rides {
         Location me = p.getLocation();
         World w = me.getWorld();
         double ground = w.getHighestBlockYAt(me);
-        Player tgt = landing ? null : nearestEnemy(p, 180);
+        Player tgt = landing ? null : knownEnemy.apply(180.0);
         if (!landing && (tgt == null || now - since > 20 * 90)) landing = true;
         if (landing) {
             // Садимся: нос вниз, без газа, у земли - выходим.
@@ -989,18 +1048,6 @@ final class Rides {
             mgr.chat(p, BotChatter.Topic.DRONE, 0.15, null, null);
         }
         return true;
-    }
-
-    private Player nearestEnemy(Player p, double r) {
-        Player best = null;
-        double bd = r * r;
-        for (Player o : hooks.alivePlayers()) {
-            if (o.getUniqueId().equals(self) || hooks.sameTeam(self, o.getUniqueId())) continue;
-            if (!o.getWorld().equals(p.getWorld()) || o.getGameMode() != org.bukkit.GameMode.SURVIVAL) continue;
-            double d = o.getLocation().distanceSquared(p.getLocation());
-            if (d < bd) { bd = d; best = o; }
-        }
-        return best;
     }
 
     private void endCar(int now, int ban) {

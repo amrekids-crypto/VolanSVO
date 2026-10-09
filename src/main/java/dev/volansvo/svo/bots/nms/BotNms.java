@@ -54,6 +54,11 @@ public final class BotNms {
 
     // ---------------------------------------------------------------- жизненный цикл
 
+    /** Обычный пинг этого бота в табе (от ника, 25..84 мс): с ним бот и заходит, а не с 0. */
+    public static int basePing(String name) {
+        return 25 + Math.floorMod(name.hashCode() * 31, 60);
+    }
+
     /** Создаёт бота и вводит его на сервер как обычного игрока (PlayerJoinEvent, таб, трекинг). */
     public static Player spawn(String name, UUID uuid, Location loc, String skinValue, String skinSignature) {
         MinecraftServer server = ((CraftServer) Bukkit.getServer()).getServer();
@@ -70,7 +75,7 @@ public final class BotNms {
 
         BotPlayer bot = new BotPlayer(server, level, profile, info);
         FakeConnection connection = new FakeConnection();
-        server.getPlayerList().placeNewPlayer(connection, bot, new CommonListenerCookie(profile, 0, info, false));
+        server.getPlayerList().placeNewPlayer(connection, bot, new CommonListenerCookie(profile, basePing(name), info, false));
         bot.setClientLoaded(true);
 
         Player bukkit = bot.getBukkitEntity();
@@ -93,6 +98,43 @@ public final class BotNms {
         if (!(p instanceof CraftPlayer)) return null;
         Object h = ((CraftPlayer) p).getHandle();
         return (h instanceof BotPlayer) ? (BotPlayer) h : null;
+    }
+
+    /**
+     * Сам предмет в слоте инвентаря (объект сервера, а не копия Bukkit): пока слот не
+     * перекладывали, это тот же объект. По нему бот узнаёт, что вещь в слоте не менялась.
+     */
+    public static Object rawItem(Player p, int slot) {
+        BotPlayer bot = handle(p);
+        if (bot == null) return null;
+        try {
+            // Съеденная/потраченная вещь остаётся тем же объектом с количеством 0 - это пустой слот.
+            net.minecraft.world.item.ItemStack s = bot.getInventory().getItem(slot);
+            return s == null || s.isEmpty() ? null : s;
+        } catch (Throwable t) { return null; }
+    }
+
+    private static java.lang.reflect.Field latencyField;
+    private static boolean latencySearched;
+
+    /**
+     * Пинг в табе. У бота нет соединения, и сервер показывал 0 мс - сразу видно, что не человек.
+     * Ставим правдоподобный пинг; не вышло (другая версия сервера) - молча оставляем как есть.
+     */
+    public static void setLatency(Player p, int ms) {
+        BotPlayer bot = handle(p);
+        if (bot == null || bot.connection == null) return;
+        try {
+            if (!latencySearched) {
+                latencySearched = true;
+                for (Class<?> c = bot.connection.getClass(); c != null && latencyField == null; c = c.getSuperclass()) {
+                    for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                        if (f.getName().equals("latency") && f.getType() == int.class) { f.setAccessible(true); latencyField = f; break; }
+                    }
+                }
+            }
+            if (latencyField != null) latencyField.setInt(bot.connection, ms);
+        } catch (Throwable ignored) {}
     }
 
     // ---------------------------------------------------------------- движение

@@ -316,7 +316,9 @@ public class AirdropManager {
 
                 // Столб партиклов от airpig до пола - каждому игроку, force=true чтобы видно издалека
                 int curY = (int) Math.floor(y);
-                for (Player viewer : world.getPlayers()) {
+                // Столб шлём через тик: дым висит дольше тика, а пакетов вдвое меньше
+                // (до ~125 частиц каждому игроку каждый тик полторы минуты подряд).
+                if (ticks % 2 == 1) for (Player viewer : world.getPlayers()) {
                     if (plugin.getGameManager().isBot(viewer.getUniqueId())) continue;
                     for (int py = floorY; py <= curY; py += 2) {
                         viewer.spawnParticle(Particle.SMOKE,

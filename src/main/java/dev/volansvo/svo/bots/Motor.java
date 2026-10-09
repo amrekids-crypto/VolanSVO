@@ -14,6 +14,8 @@ public final class Motor {
 
     private float yaw, pitch;
     private boolean init;
+    /** До этого тика сервера обычный поворот головы не трогает взгляд: идёт наведение (aim). */
+    private int aimLock = Integer.MIN_VALUE;
     private AimModel aim;
 
     /** Включить модель руки для ведения цели в бою. */
@@ -55,6 +57,8 @@ public final class Motor {
     /** Поворачивает взгляд к (targetYaw, targetPitch) не быстрее maxTurn градусов за тик. */
     public void turn(Player p, float targetYaw, float targetPitch, float maxTurn) {
         if (!init) sync(p);
+        // Бот доводит взгляд до точки (кинуть, открыть, поставить): ходьба его не сбивает.
+        if (org.bukkit.Bukkit.getCurrentTick() <= aimLock) return;
         float dy = wrap(targetYaw - yaw);
         float dp = targetPitch - pitch;
         // Быстрее на больших углах, плавно дотягивает на малых (как рука с мышью).
@@ -65,6 +69,31 @@ public final class Motor {
         yaw = wrap(yaw + Math.signum(dy) * stepY);
         pitch = Math.max(-90f, Math.min(90f, pitch + Math.signum(dp) * stepP));
         BotNms.look(p, yaw, pitch);
+    }
+
+    /**
+     * Быстро навести взгляд (поставить блок, открыть дверь, сбить ракету): за тик не больше
+     * 50 градусов - человек так и делает, а рывок на 90-180 градусов за тик выдаёт бота.
+     * true - взгляд уже на точке (с точностью tol), можно жать.
+     */
+    public boolean aim(Player p, float targetYaw, float targetPitch, float tol) {
+        if (!init) sync(p);
+        float dy = wrap(targetYaw - yaw), dp = targetPitch - pitch;
+        if (Math.abs(dy) > tol || Math.abs(dp) > tol) {
+            yaw = wrap(yaw + Math.max(-50f, Math.min(50f, dy)));
+            pitch = Math.max(-90f, Math.min(90f, pitch + Math.max(-50f, Math.min(50f, dp))));
+            dy = wrap(targetYaw - yaw);
+            dp = targetPitch - pitch;
+            if (Math.abs(dy) > tol || Math.abs(dp) > tol) {
+                BotNms.look(p, yaw, pitch);
+                aimLock = org.bukkit.Bukkit.getCurrentTick() + 1;
+                return false;
+            }
+        }
+        yaw = wrap(targetYaw);
+        pitch = Math.max(-90f, Math.min(90f, targetPitch));
+        BotNms.look(p, yaw, pitch);
+        return true;
     }
 
     /**

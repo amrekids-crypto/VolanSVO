@@ -246,6 +246,7 @@ final class Builder {
 
     /** downOnly: только кликом по блоку снизу (столб под собой), на стены не смотрим. */
     boolean place(Player p, Block target, boolean downOnly) {
+        turning = false;
         if (placeBlocked() || !inZone(target)) return false;
         if (!target.getType().isAir() && !target.isReplaceable() && !target.isLiquid()) return false;
         int slot = blockSlot(p);
@@ -260,10 +261,13 @@ final class Builder {
                 0.5 + clicked.getModZ() * 0.5);
             if (p.getEyeLocation().distance(hit) > 4.4) continue;
             Location eye = p.getEyeLocation();
-            float yaw = Motor.yawTo(hit.getX() - eye.getX(), hit.getZ() - eye.getZ());
+            // Блок прямо под собой: направление по горизонтали случайное - голову не крутим,
+            // важен только наклон.
+            float yaw = Math.hypot(hit.getX() - eye.getX(), hit.getZ() - eye.getZ()) < 1.0 ? motor.yaw()
+                : Motor.yawTo(hit.getX() - eye.getX(), hit.getZ() - eye.getZ());
             float pitch = Motor.pitchTo(hit.getX() - eye.getX(), hit.getY() - eye.getY(), hit.getZ() - eye.getZ());
-            BotNms.look(p, yaw, pitch);
-            motor.sync(p);
+            // Сначала доворачиваем голову (не рывком), потом жмём.
+            if (!motor.aim(p, yaw, pitch, 9f)) { turning = true; return false; }
             BotNms.useItemOn(p, n.getX(), n.getY(), n.getZ(), faceIndex(clicked));
             p.swingMainHand();
             tried = true;
@@ -275,6 +279,105 @@ final class Builder {
             placeBlockedUntil = System.currentTimeMillis() + 90_000L;
         }
         return false;
+    }
+
+    /** Последний place() не поставил блок только потому, что ещё доворачивал голову. */
+    private boolean turning;
+
+    boolean turning() { return turning; }
+
+    /**
+     * Поставить предмет из слота slot кликом по грани face блока support (лестница на стену,
+     * верстак, мина или турель на землю). true - кликнули (что встало - решает сервер).
+     */
+    boolean useOnFace(Player p, Block support, BlockFace face, int slot) {
+        turning = false;
+        if (slot < 0 || !inZone(support) || !hold.test(slot)) return false;
+        Location hit = support.getLocation().add(0.5 + face.getModX() * 0.5, 0.5 + face.getModY() * 0.5, 0.5 + face.getModZ() * 0.5);
+        Location eye = p.getEyeLocation();
+        if (eye.distance(hit) > 4.4) return false;
+        float yaw = Motor.yawTo(hit.getX() - eye.getX(), hit.getZ() - eye.getZ());
+        float pitch = Motor.pitchTo(hit.getX() - eye.getX(), hit.getY() - eye.getY(), hit.getZ() - eye.getZ());
+        if (!motor.aim(p, yaw, pitch, 9f)) { turning = true; return false; }
+        BotNms.useItemOn(p, support.getX(), support.getY(), support.getZ(), faceIndex(face));
+        p.swingMainHand();
+        return true;
+    }
+
+    // ================================================================== лестница по стене
+
+    static int ladderSlot(Player p) {
+        for (int i = 0; i < 36; i++) {
+            ItemStack it = p.getInventory().getItem(i);
+            if (it != null && it.getType() == Material.LADDER && !it.hasItemMeta()) return i;
+        }
+        return -1;
+    }
+
+    static int ladderCount(Player p) {
+        int n = 0;
+        for (int i = 0; i < 36; i++) {
+            ItemStack it = p.getInventory().getItem(i);
+            if (it != null && it.getType() == Material.LADDER && !it.hasItemMeta()) n += it.getAmount();
+        }
+        return n;
+    }
+
+    private int nextLadderPlace, ladderTries;
+    private long ladderCell = Long.MIN_VALUE;
+
+    /**
+     * Подъём по стене на лестницах: (dx,dz) - направление на стену, topFeetY - на какую высоту
+     * ног выбраться. Лестница ставится на стену в клетке бота (сначала встаём в середину
+     * клетки, иначе лестница не встанет - в ней тело), потом лезем с зажатым прыжком, ставя
+     * следующую выше. Наверху шагаем на стену. true - ещё лезем; false - готово или нечем.
+     */
+    boolean ladderClimb(Player p, int dx, int dz, int topFeetY, int now) {
+        Location l = p.getLocation();
+        World w = p.getWorld();
+        int x = l.getBlockX(), z = l.getBlockZ(), fy = (int) Math.floor(l.getY() + 0.01);
+        if (fy >= topFeetY && BotNms.onGround(p)) return false;
+        BlockFace face = dx > 0 ? BlockFace.WEST : dx < 0 ? BlockFace.EAST : dz > 0 ? BlockFace.NORTH : BlockFace.SOUTH;
+        Block wallFeet = w.getBlockAt(x + dx, fy, z + dz);
+        // Стена у ног кончилась, а под ней ещё стена - мы наверху: шаг вперёд на неё.
+        if (!wallFeet.getType().isSolid()) {
+            if (!w.getBlockAt(x + dx, fy - 1, z + dz).getType().isSolid()) return false; // стены нет вовсе
+            motor.turn(p, Motor.yawTo(dx, dz), 10f, 30f);
+            motor.drive(p, dx, dz, 1.0, 0f, true, false);
+            return true;
+        }
+        // Лестницы в своей клетке на уровне ног и головы, где за ними стена.
+        boolean climbing = p.isClimbing();
+        for (int dy = 0; dy <= 1; dy++) {
+            Block cell = w.getBlockAt(x, fy + dy, z), wall = w.getBlockAt(x + dx, fy + dy, z + dz);
+            if (cell.getType() == Material.LADDER || !wall.getType().isSolid()) continue;
+            if (!cell.getType().isAir() && !cell.isReplaceable()) return false; // клетка занята - не поставить
+            int slot = ladderSlot(p);
+            if (slot < 0) return climbing; // лестницы кончились: долезть по поставленным
+            // Встаём в середину клетки, чуть отступив от стены: лестница занимает 3/16 блока у
+            // стены, и если тело заходит туда хоть немного, сервер её не ставит.
+            double tx = x + 0.5 - dx * 0.08, tz = z + 0.5 - dz * 0.08;
+            double cx = tx - l.getX(), cz = tz - l.getZ();
+            double toWall = (l.getX() - (x + 0.5)) * dx + (l.getZ() - (z + 0.5)) * dz;
+            double lateral = Math.abs((l.getX() - (x + 0.5)) * dz) + Math.abs((l.getZ() - (z + 0.5)) * dx);
+            if (!climbing && (toWall > 0.0 || toWall < -0.18 || lateral > 0.15)) {
+                motor.drive(p, cx, cz, 0.25, 0f, false, false);
+                return true;
+            }
+            BotNms.input(p, 0f, 0f, false);
+            if (now < nextLadderPlace) return true;
+            nextLadderPlace = now + 4;
+            // Кликнули несколько раз, а лестницы нет (не даёт сервер или плагин) - бросаем.
+            long k = key(cell);
+            if (k != ladderCell) { ladderCell = k; ladderTries = 0; }
+            if (++ladderTries > 6) return false;
+            if (!useOnFace(p, wall, face, slot) && !turning) return false;
+            return true;
+        }
+        // Лезем: к стене с зажатым прыжком, взгляд на стену чуть вверх.
+        motor.turn(p, Motor.yawTo(dx, dz), -25f, 30f);
+        motor.drive(p, dx, dz, 0.5, 0f, true, false);
+        return true;
     }
 
     private static int faceIndex(BlockFace f) {
@@ -337,8 +440,8 @@ final class Builder {
                         || !Items.isBuildBlock(p.getInventory().getItemInMainHand())) { towerWhy = "take block"; BotNms.input(p, 0f, 0f, false); return true; }
             }
         }
-        BotNms.look(p, motor.yaw(), 89f);
-        motor.sync(p);
+        // Взгляд вниз - не рывком: на земле сначала опускаем голову, потом прыгаем.
+        if (!motor.aim(p, motor.yaw(), 89f, 4f) && ground) { towerWhy = "look down"; BotNms.input(p, 0f, 0f, false); return true; }
         BotNms.input(p, 0f, 0f, ground);
         if (!ground && towerFeetY != Integer.MIN_VALUE && l.getY() >= towerFeetY + 1.02) {
             Block below = p.getWorld().getBlockAt(l.getBlockX(), towerFeetY, l.getBlockZ());

@@ -131,8 +131,6 @@ public class GameManager {
     private int watchdogLastSeenTick = -1;
     private int watchdogStallCount = 0;
 
-    /** Сохранённая позиция игрока для респавна (для режима 2 жизней). */
-    private final Map<UUID, Location> respawnLocations = new HashMap<UUID, Location>();
 
     /** Сколько тиков ПОДРЯД игрок замечен вне игрового мира (checkDimensions). Страховка от
      *  ложного выбывания из-за одиночного "моргания" (напр. сильный взрыв в Хаосе выкинул
@@ -624,8 +622,9 @@ public class GameManager {
                     if (p == null || !p.getWorld().equals(gw)) continue;
                     p.addPotionEffect(new PotionEffect(
                         PotionEffectType.SATURATION, 60, 255, true, false, false));
+                    // Сила лечения 4 << amplifier: при 255 сдвиг переполняется и лечит 0 - берём 3 (+32 хп).
                     p.addPotionEffect(new PotionEffect(
-                        PotionEffectType.INSTANT_HEALTH, 60, 255, true, false, false));
+                        PotionEffectType.INSTANT_HEALTH, 60, 3, true, false, false));
                 }
             }
 
@@ -721,6 +720,8 @@ public class GameManager {
         if (queue.contains(player.getUniqueId())) return;
         queue.add(player.getUniqueId());
         state = GameState.QUEUE;
+        // Голосование уже идёт: новичку тоже нужна кнопка, иначе без его голоса оно не пройдёт.
+        if (activeVote != null) sendVotePrompt(player);
         // Сообщаем ВСЕМ в очереди о новом игроке.
         for (Player q : getQueuedPlayers()) {
             q.sendMessage(ChatColor.YELLOW + player.getName() + ChatColor.GRAY + " зашёл в очередь. "
@@ -759,6 +760,13 @@ public class GameManager {
         if (queue.isEmpty() && state == GameState.QUEUE) state = GameState.IDLE;
         // Если в фазе формирования никого не осталось - отменяем.
         if (formationActive && queue.isEmpty()) cancelFormation();
+        // Ушёл тот, кто не голосовал: возможно, проголосовали уже все оставшиеся. Проверяем
+        // тиком позже (сейчас может идти событие выхода игрока).
+        if (activeVote != null && state == GameState.QUEUE && plugin.isEnabled()) {
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (activeVote != null && state == GameState.QUEUE) checkVoteComplete();
+            });
+        }
     }
 
     /** Убирает игрока из команд/заявок формирования (при выходе из очереди). */
@@ -1249,7 +1257,12 @@ public class GameManager {
     /** Выдаёт инициатору барьер отмены голосования (правый край хотбара). */
     public void giveCancelVoteItem(Player p) {
         if (p == null) return;
-        p.getInventory().setItem(8, createCancelVoteItem());
+        // Правый край хотбара, если он свободен; иначе любой свободный слот. Раньше барьер
+        // ложился в 9-й слот поверх вещи игрока (инвентарь в хабе не чистится) - вещь пропадала.
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        org.bukkit.inventory.ItemStack at8 = inv.getItem(8);
+        if (at8 == null || at8.getType() == Material.AIR) inv.setItem(8, createCancelVoteItem());
+        else inv.addItem(createCancelVoteItem()); // места нет - без барьера (отмена и так по таймауту)
         p.updateInventory();
     }
 
@@ -1938,7 +1951,7 @@ public class GameManager {
 
         plugin.getLogger().info("[СВО] requestStart от " + initiator.getName()
             + ": lives=" + lives + " time=" + timeMins + " teamSize=" + teamSizeArg + " manual=" + manualTeams);
-        activeVote = new VotingSession(lives, timeMins, withZir, withGlow, withFastZone, withAirdrops, withTeamGlow, withChaos, teamSizeArg, manualTeams, getQueueUuids());
+        activeVote = new VotingSession(lives, timeMins, withZir, withGlow, withFastZone, withAirdrops, withTeamGlow, withChaos, teamSizeArg, manualTeams);
         activeVote.bots = bots;
         activeVote.initiator = initiator.getUniqueId();
 
@@ -1948,27 +1961,11 @@ public class GameManager {
         giveCancelVoteItem(initiator);
 
         // Broadcast clickable vote prompt to QUEUED players ONLY
-        String voteCmd = "/svovote";
         for (Player p : getQueuedPlayers()) {
             if (p.getUniqueId().equals(initiator.getUniqueId())) continue; // skip initiator, they already voted
-            p.sendMessage("");
-            p.sendMessage(ChatColor.GOLD + "===== Голосование за начало СВО =====");
-            // Показываем выбранную карту
-            dev.volansvo.svo.maps.MapData voteMap = plugin.getMapManager().getActiveMap();
-            String mapName = voteMap != null ? voteMap.getDisplayName() : "не выбрана";
-            p.sendMessage(ChatColor.GRAY + "Карта: " + ChatColor.AQUA + mapName);
-            p.sendMessage(ChatColor.GRAY + "Инициатор: " + ChatColor.WHITE + initiator.getName());
-            p.sendMessage(ChatColor.GRAY + "Жизней: " + ChatColor.WHITE + lives + ChatColor.GRAY + " | Время: " + ChatColor.WHITE + timeMins + " мин");
-            p.sendMessage(ChatColor.GRAY + "Жириновский: " + boolStr(withZir) + ChatColor.GRAY + " | Подсветка: " + boolStr(withGlow));
-            p.sendMessage(ChatColor.GRAY + "Быстрая зона: " + boolStr(withFastZone) + ChatColor.GRAY + " | Аирдропы: " + boolStr(withAirdrops));
-            if (withChaos) p.sendMessage(ChatColor.GRAY + "Хаос: " + boolStr(true));
-            if (teamSizeArg > 1) p.sendMessage(ChatColor.GRAY + "Подсветка тиммейтов: " + boolStr(withTeamGlow));
-            p.sendMessage(ChatColor.GRAY + "Режим: " + ChatColor.AQUA + fullModeName(teamSizeArg, manualTeams));
-            if (bots > 0) p.sendMessage(ChatColor.GRAY + "Боты: " + ChatColor.WHITE + bots);
-            String tellraw = "tellraw " + p.getName() + " {\"text\":\"[ДА]\",\"color\":\"green\",\"bold\":true,\"clickEvent\":{\"action\":\"run_command\",\"value\":\"" + voteCmd + "\"},\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"Нажми чтобы проголосовать\"}}";
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), tellraw);
+            sendVotePrompt(p);
         }
-        initiator.sendMessage(ChatColor.GREEN + "Твой голос засчитан автоматически (" + activeVote.votes.size() + "/" + activeVote.required + ").");
+        initiator.sendMessage(ChatColor.GREEN + "Твой голос засчитан автоматически (" + validVotes() + "/" + queue.size() + ").");
 
         // Auto-cancel after 60 seconds
         final VotingSession session = activeVote;
@@ -1989,13 +1986,37 @@ public class GameManager {
         checkVoteComplete();
     }
 
+    /** Сообщение о голосовании с кнопкой [ДА] (и тем, кто встал в очередь, пока оно идёт). */
+    private void sendVotePrompt(Player p) {
+        VotingSession v = activeVote;
+        if (v == null) return;
+        Player init = v.initiator == null ? null : Bukkit.getPlayer(v.initiator);
+        p.sendMessage("");
+        p.sendMessage(ChatColor.GOLD + "===== Голосование за начало СВО =====");
+        dev.volansvo.svo.maps.MapData voteMap = plugin.getMapManager().getActiveMap();
+        String mapName = voteMap != null ? voteMap.getDisplayName() : "не выбрана";
+        p.sendMessage(ChatColor.GRAY + "Карта: " + ChatColor.AQUA + mapName);
+        p.sendMessage(ChatColor.GRAY + "Инициатор: " + ChatColor.WHITE + (init != null ? init.getName() : "?"));
+        p.sendMessage(ChatColor.GRAY + "Жизней: " + ChatColor.WHITE + v.lives + ChatColor.GRAY + " | Время: " + ChatColor.WHITE + v.timeMins + " мин");
+        p.sendMessage(ChatColor.GRAY + "Жириновский: " + boolStr(v.withZir) + ChatColor.GRAY + " | Подсветка: " + boolStr(v.withGlow));
+        p.sendMessage(ChatColor.GRAY + "Быстрая зона: " + boolStr(v.withFastZone) + ChatColor.GRAY + " | Аирдропы: " + boolStr(v.withAirdrops));
+        if (v.withChaos) p.sendMessage(ChatColor.GRAY + "Хаос: " + boolStr(true));
+        if (v.teamSize > 1) p.sendMessage(ChatColor.GRAY + "Подсветка тиммейтов: " + boolStr(v.withTeamGlow));
+        p.sendMessage(ChatColor.GRAY + "Режим: " + ChatColor.AQUA + fullModeName(v.teamSize, v.manualTeams));
+        if (v.bots > 0) p.sendMessage(ChatColor.GRAY + "Боты: " + ChatColor.WHITE + v.bots);
+        String tellraw = "tellraw " + p.getName() + " {\"text\":\"[ДА]\",\"color\":\"green\",\"bold\":true,\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/svovote\"},\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"Нажми чтобы проголосовать\"}}";
+        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), tellraw);
+    }
+
     /** Called by /svovote. Returns true if vote was registered. */
     public boolean castVote(Player player) {
         if (activeVote == null) {
             player.sendMessage(ChatColor.RED + "Сейчас нет активного голосования.");
             return false;
         }
-        if (!activeVote.eligible.contains(player.getUniqueId())) {
+        // Голосуют все, кто сейчас в очереди: и те, кто встал в неё уже во время голосования
+        // (раньше их не пускали, а голос требовался от всей очереди - голосование зависало).
+        if (!queue.contains(player.getUniqueId())) {
             player.sendMessage(ChatColor.RED + "Ты не в очереди.");
             return false;
         }
@@ -2006,10 +2027,18 @@ public class GameManager {
         activeVote.votes.add(player.getUniqueId());
         // Notify only queued players
         for (Player q : getQueuedPlayers()) {
-            q.sendMessage(ChatColor.GREEN + player.getName() + " проголосовал (" + activeVote.votes.size() + "/" + activeVote.required + ")");
+            q.sendMessage(ChatColor.GREEN + player.getName() + " проголосовал (" + validVotes() + "/" + queue.size() + ")");
         }
         checkVoteComplete();
         return true;
+    }
+
+    /** Голоса тех, кто ещё в очереди (ушедшие не считаются). */
+    private int validVotes() {
+        if (activeVote == null) return 0;
+        int valid = 0;
+        for (UUID uid : activeVote.votes) if (queue.contains(uid)) valid++;
+        return valid;
     }
 
     private void checkVoteComplete() {
@@ -2017,10 +2046,7 @@ public class GameManager {
         purgeQueue();
 
         // Count valid votes (must still be in queue with insvo tag)
-        int valid = 0;
-        for (UUID uid : activeVote.votes) {
-            if (queue.contains(uid)) valid++;
-        }
+        int valid = validVotes();
         // Required = ALL currently queued players must vote
         if (valid >= queue.size() && !queue.isEmpty() && queue.size() + activeVote.bots >= 2) {
             VotingSession s = activeVote;
@@ -2056,6 +2082,9 @@ public class GameManager {
 
     // ----- Start (actual game start, no world recreation) -----
 
+    /** Номер попытки старта: колбэк клонирования мира от старой (отменённой) попытки ничего не делает. */
+    private int startGeneration;
+
     private void startGame(final VotingSession s) {
         purgeQueue();
         if (queue.isEmpty() || queue.size() + s.bots < 2) {
@@ -2067,17 +2096,24 @@ public class GameManager {
         final dev.volansvo.svo.maps.MapData map = plugin.getMapManager().getActiveMap();
         final String targetGW = plugin.getWorldManager().gameWorldNameFor(map);
         state = GameState.STARTING; // блокируем повторный старт пока клонируется мир
+        final int gen = ++startGeneration;
         for (Player p : getQueuedPlayers()) {
             p.sendMessage(ChatColor.YELLOW + "Готовим карту "
                 + (map != null ? map.getDisplayName() : "СВО") + "...");
         }
         plugin.getWorldManager().cloneMapWorld(map, new Runnable() {
             @Override public void run() {
+                // Пока клонировался мир, старт отменили (/asvostop, все вышли) или начали заново.
+                if (gen != startGeneration || state != GameState.STARTING) {
+                    // Лишний мир убираем, только пока никакой игры нет (иначе это может быть её мир).
+                    if ((state == GameState.IDLE || state == GameState.QUEUE) && Bukkit.getWorld(targetGW) != null) {
+                        try { plugin.getWorldManager().deleteNamedWorld(targetGW); } catch (Throwable ignored) {}
+                    }
+                    return;
+                }
                 World gw = Bukkit.getWorld(targetGW);
                 if (gw == null) {
-                    state = GameState.IDLE;
-                    for (Player p : getQueuedPlayers())
-                        p.sendMessage(ChatColor.RED + "Не удалось создать мир карты. Игра отменена.");
+                    abortStart(null, "Не удалось создать мир карты. Игра отменена.");
                     return;
                 }
                 // Для карты east: после создания мира размещаем поезда на всех точках.
@@ -2124,8 +2160,7 @@ public class GameManager {
         purgeQueue();
         int humans = queue.size();
         if (humans < 1 || humans + s.bots < 2) {
-            state = GameState.IDLE;
-            broadcastGame(ChatColor.RED + "Меньше 2 участников - игра отменена.");
+            abortStart(plugin.getWorldManager().getGameWorld(), "Меньше 2 участников - игра отменена.");
             return;
         }
         // Один человек против ботов - игра в статистику не идёт (винрейт не меняется).
@@ -2185,12 +2220,44 @@ public class GameManager {
 
         World gameWorld = plugin.getWorldManager().getGameWorld();
         if (gameWorld == null) {
-            broadcastGame(ChatColor.RED + "Мир игры не создан.");
-            plugin.getBotManager().removeAll();
+            abortStart(null, "Мир игры не создан. Игра отменена.");
             return;
         }
 
         doStartGame(gameWorld);
+    }
+
+    /**
+     * Старт сорвался после того, как мир склонирован или участники помечены: возвращаем людей
+     * в очередь, снимаем метки игры, убираем ботов и лишний мир. Раньше такие отмены оставляли
+     * склонированный мир, тег svoplayer, скрытые ники и состояние STARTING/IDLE при живой очереди.
+     */
+    private void abortStart(World clonedWorld, String reason) {
+        plugin.getBotManager().removeAll();
+        Set<UUID> back = new LinkedHashSet<UUID>(queue);
+        for (UUID uid : players.keySet()) if (!isBot(uid)) back.add(uid);
+        players.clear();
+        queue.clear();
+        clearSquadTeams();
+        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "scoreboard players set Kirqum IsGameSvo 0");
+        state = GameState.QUEUE; // giveStartItem не выдаёт предмет, пока идёт старт
+        for (UUID uid : back) {
+            Player p = Bukkit.getPlayer(uid);
+            if (p == null || isBot(uid)) continue;
+            p.removeScoreboardTag("svoplayer");
+            showNameTag(p);
+            p.sendMessage(ChatColor.RED + reason);
+            if (p.getScoreboardTags().contains("insvo")) {
+                queue.add(uid);
+                giveStartItem(p);
+            }
+        }
+        state = queue.isEmpty() ? GameState.IDLE : GameState.QUEUE;
+        if (clonedWorld != null) {
+            try { plugin.getWorldManager().deleteNamedWorld(clonedWorld.getName()); } catch (Throwable ignored) {}
+        }
+        // Как и при отмене голосования: карта больше не выбрана, лобби и рестарт - снова хаб.
+        plugin.getMapManager().clearActiveMap();
     }
 
     private void doStartGame(World gameWorld) {
@@ -2217,6 +2284,11 @@ public class GameManager {
         }
         queue.clear();
 
+        if (players.size() < 2) {
+            abortStart(gameWorld, "Меньше 2 игроков онлайн - игра отменена.");
+            return;
+        }
+
         // Раскидываем игроков по командам (Дуо/Трио) с выключенным friendly fire.
         assignTeams();
 
@@ -2234,14 +2306,6 @@ public class GameManager {
         }
 
         plugin.getBossbarManager().setupTimerBar(timerTicks);
-
-        if (players.size() < 2) {
-            state = GameState.IDLE;
-            queue.clear();
-            broadcastGame(ChatColor.RED + "Меньше 2 игроков онлайн - игра отменена.");
-            plugin.getBotManager().removeAll();
-            return;
-        }
 
         // Рандомный TP в spawn_box активной карты (или из config для дефолта).
         Random rng = new Random();
@@ -2804,6 +2868,35 @@ public class GameManager {
     }
 
     /**
+     * Кто бил игрока последним за 15 секунд (враг, участник игры) или null. Нужен, когда смерть
+     * не от прямого удара (взрыв, плагинное оружие, дрон, падение после удара): getKiller() тогда
+     * пуст, и убийство раньше никому не засчитывалось.
+     */
+    public UUID recentAttacker(UUID victim) {
+        UUID a = lastDamager.get(victim);
+        Long t = lastDamageTime.get(victim);
+        if (a == null || t == null || System.currentTimeMillis() - t > COMBAT_TAG_MS) return null;
+        if (sameTeam(a, victim) || !isPlayerInGame(a)) return null;
+        return a;
+    }
+
+    /** Смерть засчитана - прошлый бой не тянется в следующую жизнь. */
+    public void clearCombatTag(UUID victim) {
+        lastDamager.remove(victim);
+        lastDamageTime.remove(victim);
+    }
+
+    /** Кому засчитана последняя смерть игрока (для ботов: месть, реплики). */
+    private final Map<UUID, UUID> lastKiller = new HashMap<UUID, UUID>();
+
+    public void noteKill(UUID victim, UUID killer) {
+        if (killer == null) lastKiller.remove(victim); else lastKiller.put(victim, killer);
+    }
+
+    /** Убийца этой смерти (читается один раз: следующая смерть того же игрока - уже другая). */
+    public UUID killerOf(UUID victim) { return lastKiller.remove(victim); }
+
+    /**
      * Полный сброс боевого состояния игрока (против пре-баффов): снимает все зелья,
      * огонь, падение, восстанавливает здоровье/сытость/воздух, выключает полёт.
      */
@@ -3012,7 +3105,7 @@ public class GameManager {
                 p.setFallDistance(0f);
                 p.addPotionEffect(new PotionEffect(PotionEffectType.RESISTANCE, 60, 4, true, false, false));
                 p.addPotionEffect(new PotionEffect(PotionEffectType.SATURATION, 60, 255, true, false, false));
-                p.addPotionEffect(new PotionEffect(PotionEffectType.INSTANT_HEALTH, 1, 255, true, false, false));
+                p.addPotionEffect(new PotionEffect(PotionEffectType.INSTANT_HEALTH, 1, 3, true, false, false)); // 255 переполнялось и не лечило
             }
         }, 2L);
     }
@@ -3101,7 +3194,7 @@ public class GameManager {
 
         if (endedGameWorld != null) setMarkerSign(endedGameWorld, "Спасибо", "за игру!");
 
-        new BukkitRunnable() {
+        pendingEnding = new Runnable() {
             @Override
             public void run() {
                 plugin.getBotManager().removeAll();
@@ -3113,10 +3206,36 @@ public class GameManager {
                 }
                 state = GameState.IDLE;
             }
-        }.runTaskLater(plugin, 100L);
+        };
+        // Сервер выключается: задачу уже не поставить (исключение), уборку доделает forceStop.
+        if (plugin.isEnabled()) endingTask = Bukkit.getScheduler().runTaskLater(plugin, new Runnable() {
+            @Override public void run() { runPendingEnding(); }
+        }, 100L);
     }
 
-    public void forceStop() { endGameNow(null); }
+    /** Уборка после конца игры (через 5 сек после итогов) и её задача. */
+    private Runnable pendingEnding;
+    private BukkitTask endingTask;
+
+    /**
+     * Доделать уборку после конца игры прямо сейчас. Нужна, когда ждать нельзя: сервер
+     * выключается (отложенные задачи уже не выполнятся) или админ остановил игру - раньше
+     * /asvostop сначала стирал список игроков, и отложенная уборка потом никого не возвращала в лобби.
+     */
+    private void runPendingEnding() {
+        Runnable r = pendingEnding;
+        pendingEnding = null;
+        if (endingTask != null) { endingTask.cancel(); endingTask = null; }
+        if (r == null) return;
+        try {
+            r.run();
+        } catch (Throwable t) {
+            plugin.getLogger().warning("[СВО] Ошибка уборки после игры: " + t);
+            state = GameState.IDLE;
+        }
+    }
+
+    public void forceStop() { endGameNow(null); runPendingEnding(); }
 
     /**
      * Проверяет, остался ли в игре хоть один онлайн-участник.
@@ -3171,7 +3290,6 @@ public class GameManager {
         timeRanOut = false;
         glowTimer = 4800;
         airdropTimer = 0;
-        respawnLocations.clear();
         respawnGrace.clear();
         sleptThisRound.clear();
         yanikLastStrike.clear();
@@ -3194,7 +3312,6 @@ public class GameManager {
         activeVote = null;
         winner = null;
         currentTick = 0;
-        respawnLocations.clear();
         respawnGrace.clear();
         sleptThisRound.clear();
         yanikLastStrike.clear();
@@ -3268,6 +3385,7 @@ public class GameManager {
 
     public void forceStopAndDelete() {
         endGameNow(null);
+        runPendingEnding(); // вернуть всех в лобби, пока список игроков ещё цел
         // Жёсткая чистка - всё что endGameNow мог пропустить
         purgeAllTagsAndBars();
         new BukkitRunnable() {
@@ -3291,6 +3409,9 @@ public class GameManager {
      */
     public void purgeAllTagsAndBars() {
         plugin.getBotManager().removeAll();
+        lastKiller.clear();
+        lastDamager.clear();
+        lastDamageTime.clear();
         // Теги у всех онлайн игроков (на случай если есть осиротевшие)
         for (Player p : Bukkit.getOnlinePlayers()) {
             p.removeScoreboardTag("svoplayer");
@@ -3416,7 +3537,7 @@ public class GameManager {
         // СТРАХОВКА: иногда первый телепорт не срабатывает (асинхронная загрузка
         // чанка, игрок ещё в спектаторе). Несколько раз проверяем, что эти КОНКРЕТНЫЕ
         // игроки покинули игровой мир, и доталкиваем оставшихся. Чужих не трогаем.
-        if (gameWorld != null) {
+        if (gameWorld != null && plugin.isEnabled()) { // при выключении сервера задачу уже не поставить
             new BukkitRunnable() {
                 int tries = 0;
                 @Override public void run() {
@@ -3452,6 +3573,9 @@ public class GameManager {
         activeVote = null;
         timeRanOut = false;
         dimensionMismatchTicks.clear();
+        lastKiller.clear();
+        lastDamager.clear();
+        lastDamageTime.clear();
     }
 
     /**
@@ -3505,10 +3629,6 @@ public class GameManager {
 
     public SvoPlayer getSvoPlayer(UUID uid) { return players.get(uid); }
 
-    /** Берёт и очищает сохранённую позицию для респавна. */
-    public Location consumeRespawnLocation(UUID uid) {
-        return respawnLocations.remove(uid);
-    }
 
     /** Отмечает, что игрок поспал на кровати в текущей игре. */
     public void markSleptThisRound(UUID uid) { sleptThisRound.add(uid); }
@@ -3598,13 +3718,11 @@ public class GameManager {
         final boolean withZir, withGlow, withFastZone, withAirdrops, withTeamGlow, withChaos;
         final int teamSize;
         final boolean manualTeams; // true = после голосования ручное формирование команд (Дуо/Трио)
-        final Set<UUID> eligible;
         final Set<UUID> votes = new HashSet<UUID>();
-        final int required;
         UUID initiator;            // кто начал голосование (может отменить его барьером)
         int bots;                  // сколько ботов добавить в игру
 
-        VotingSession(int lives, int timeMins, boolean withZir, boolean withGlow, boolean withFastZone, boolean withAirdrops, boolean withTeamGlow, boolean withChaos, int teamSize, boolean manualTeams, Set<UUID> eligible) {
+        VotingSession(int lives, int timeMins, boolean withZir, boolean withGlow, boolean withFastZone, boolean withAirdrops, boolean withTeamGlow, boolean withChaos, int teamSize, boolean manualTeams) {
             this.lives = lives;
             this.timeMins = timeMins;
             this.withZir = withZir;
@@ -3615,8 +3733,6 @@ public class GameManager {
             this.withChaos = withChaos;
             this.teamSize = teamSize;
             this.manualTeams = manualTeams;
-            this.eligible = eligible;
-            this.required = eligible.size();
         }
     }
 }

@@ -846,6 +846,11 @@ public class ChaosManager {
         // инвентарей он уже не актуален ни у кого из пары, снимаем с обоих.
         a.removeScoreboardTag("shsender");
         b.removeScoreboardTag("shsender");
+        try { plugin.getWardenManager().onInventoriesSwapped(a, b); } catch (Throwable ignored) {}
+        if (plugin.getBotManager() != null) {
+            plugin.getBotManager().onInventorySwapped(a.getUniqueId());
+            plugin.getBotManager().onInventorySwapped(b.getUniqueId());
+        }
 
         a.sendMessage(ChatColor.LIGHT_PURPLE + "Хаос: тебя поменяло местами с " + ChatColor.WHITE + b.getName() + ChatColor.LIGHT_PURPLE + "!");
         b.sendMessage(ChatColor.LIGHT_PURPLE + "Хаос: тебя поменяло местами с " + ChatColor.WHITE + a.getName() + ChatColor.LIGHT_PURPLE + "!");

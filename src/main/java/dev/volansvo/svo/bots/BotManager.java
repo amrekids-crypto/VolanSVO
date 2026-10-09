@@ -129,6 +129,8 @@ public final class BotManager implements Listener {
 
     public void reloadSkill() {
         skill = BotSkill.from(plugin.getConfig().getConfigurationSection("bots"));
+        for (Gadgets.Type t : Gadgets.Type.values())
+            Gadgets.setWords(t, plugin.getConfig().getStringList("bots.deployables." + t.name().toLowerCase(java.util.Locale.ROOT)));
         for (Items.Custom c : Items.Custom.values()) {
             if (c == Items.Custom.UNKNOWN) continue;
             Items.setMatch(c, plugin.getConfig().getStringList("bots.custom-items." + c.name().toLowerCase(java.util.Locale.ROOT)));
@@ -153,6 +155,7 @@ public final class BotManager implements Listener {
     public List<Player> spawnForGame(int count, World world) {
         List<Player> out = new ArrayList<Player>();
         count = Math.max(0, Math.min(MAX_BOTS, count));
+        clearThreats();
         Location at = world.getSpawnLocation();
         Set<String> used = new HashSet<String>();
         for (Player p : Bukkit.getOnlinePlayers()) used.add(p.getName().toLowerCase(Locale.ROOT));
@@ -179,7 +182,9 @@ public final class BotManager implements Listener {
     }
 
     private Player spawnOne(String name, Location at, String[] skin) {
-        UUID uid = UUID.nameUUIDFromBytes(("SvoBot:" + name).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        UUID raw = UUID.nameUUIDFromBytes(("SvoBot:" + name).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        // Версия 4, как у лицензионных игроков: по версии 3 (из ника) бота легко вычислить.
+        UUID uid = new UUID((raw.getMostSignificantBits() & ~0xF000L) | 0x4000L, raw.getLeastSignificantBits());
         joining.add(uid);
         try {
             Player p = BotNms.spawn(name, uid, at, skin == null ? null : skin[0], skin == null ? null : skin[1]);
@@ -217,7 +222,10 @@ public final class BotManager implements Listener {
             BotNms.remove(p);
         }
         plugin.getStatsManager().forget(uid);
-        if (b != null) Bukkit.getScheduler().runTaskLater(plugin, () -> deletePlayerFiles(uid), 20L);
+        if (b != null) {
+            if (plugin.isEnabled()) Bukkit.getScheduler().runTaskLater(plugin, () -> deletePlayerFiles(uid), 20L);
+            else deletePlayerFiles(uid); // сервер выключается: задачи уже не ставятся
+        }
     }
 
     private boolean removingAll;
@@ -227,6 +235,7 @@ public final class BotManager implements Listener {
 
     public void removeAll() {
         removingAll = true;
+        clearThreats();
         try {
             for (UUID uid : new ArrayList<UUID>(bots.keySet())) remove(uid);
             // Страховка: боты, которых почему-то нет в списке (например после /reload).
@@ -296,8 +305,91 @@ public final class BotManager implements Listener {
             b.cpuNanos += System.nanoTime() - t0;
         }
         if (tick % 10 == 0) recordTrails();
+        if (tick % 100 == 0) fakePing();
         secNanos += System.nanoTime() - start;
         if (tick % 20 == 0) { adaptLoad(); chatterTick(); }
+    }
+
+    /** Хаос поменял инвентари двух игроков: боты среди них забывают, что где лежало. */
+    public void onInventorySwapped(UUID uid) {
+        Bot b = bots.get(uid);
+        if (b != null) b.onInventorySwapped();
+    }
+
+    /**
+     * Пинг в табе: у бота без сети он 0, и это его выдаёт. Ставим каждому свой обычный пинг
+     * (от ника, 25..95 мс) с небольшим дрожанием.
+     */
+    private void fakePing() {
+        for (Bot b : bots.values()) {
+            Player p = b.player();
+            if (p == null) continue;
+            int base = BotNms.basePing(b.name);
+            BotNms.setLatency(p, Math.max(5, base + rnd.nextInt(17) - 8));
+        }
+    }
+
+    // ===================================================================== отряд: где враги
+
+    /** Карта угроз отряда: общая на всех ботов команды. Бот без команды думает сам за себя. */
+    private final Map<Integer, ThreatMap> teamThreat = new HashMap<Integer, ThreatMap>();
+    private final Map<UUID, ThreatMap> soloThreat = new HashMap<UUID, ThreatMap>();
+    /** Когда отряд последний раз докладывал в командный чат (не спамим). */
+    private final Map<Integer, Integer> lastCalloutChat = new HashMap<Integer, Integer>();
+
+    ThreatMap threat(int teamId, UUID botId) {
+        if (teamId >= 0) {
+            ThreatMap m = teamThreat.get(teamId);
+            if (m == null) { m = new ThreatMap(); teamThreat.put(teamId, m); }
+            return m;
+        }
+        ThreatMap m = soloThreat.get(botId);
+        if (m == null) { m = new ThreatMap(); soloThreat.put(botId, m); }
+        return m;
+    }
+
+    private void clearThreats() {
+        teamThreat.clear();
+        soloThreat.clear();
+        lastCalloutChat.clear();
+    }
+
+    /**
+     * Бот увидел врага: говорит своим, где он. Боты отряда поблизости узнают примерное место,
+     * люди из команды видят доклад в командном чате («Враг на северо-востоке, метров 40»).
+     */
+    void callout(Bot from, LivingEntity enemy, Location at, int now) {
+        int team = hooks.teamIdOf(from.id);
+        Player fp = from.player();
+        if (team < 0 || fp == null || at == null || at.getWorld() == null) return;
+        for (Bot mate : bots.values()) {
+            if (mate == from || hooks.teamIdOf(mate.id) != team) continue;
+            Player mp = mate.player();
+            if (mp == null || mp.isDead() || !mp.getWorld().equals(at.getWorld())) continue;
+            if (mp.getLocation().distanceSquared(at) > 160 * 160) continue;
+            mate.onCallout(enemy, at, now);
+        }
+        Integer last = lastCalloutChat.get(team);
+        if (last != null && now - last < 20 * 12) return;
+        if (!skill.chat || rnd.nextDouble() > 0.45 || !fp.getWorld().equals(at.getWorld())) return;
+        lastCalloutChat.put(team, now);
+        // Доклады повторяются весь матч (не через pickFrom: тот не повторяет фразы до конца игры).
+        String[] ls = BotChatter.LINES.get(BotChatter.Topic.T_CALLOUT);
+        if (ls == null || ls.length == 0) return;
+        String msg = ls[rnd.nextInt(ls.length)].replace("{n}", direction(fp.getLocation(), at));
+        if (skill.chatStyle) msg = ChatStyle.apply(msg, from.skill().style, rnd, false, false);
+        teamMessage(fp, msg);
+    }
+
+    /** «на северо-востоке, метров 40» - откуда смотрит говорящий. */
+    private static String direction(Location from, Location to) {
+        double dx = to.getX() - from.getX(), dz = to.getZ() - from.getZ();
+        double a = Math.toDegrees(Math.atan2(dx, -dz)); // 0 - север (-Z), 90 - восток (+X)
+        if (a < 0) a += 360;
+        String[] side = {"на севере", "на северо-востоке", "на востоке", "на юго-востоке", "на юге", "на юго-западе", "на западе", "на северо-западе"};
+        String s = side[(int) Math.round(a / 45.0) % 8];
+        int d = (int) Math.round(Math.hypot(dx, dz) / 5.0) * 5;
+        return d <= 10 ? s + ", совсем рядом" : s + ", метров " + d;
     }
 
     // ===================================================================== тропы игроков
@@ -454,6 +546,12 @@ public final class BotManager implements Listener {
     public void onDeath(PlayerDeathEvent e) {
         final Player dead = e.getEntity();
         Player killer = dead.getKiller();
+        // Убит взрывом, дроном, плагинным оружием: убийцу уже определил DeathListener.
+        if (killer == null || killer.equals(dead)) {
+            UUID k = plugin.getGameManager().killerOf(dead.getUniqueId());
+            Player kp = k == null ? null : Bukkit.getPlayer(k);
+            if (kp != null && !kp.equals(dead)) killer = kp;
+        }
         if (killer != null) {
             Bot kb = bots.get(killer.getUniqueId());
             if (kb != null) {
@@ -470,6 +568,10 @@ public final class BotManager implements Listener {
             }
         }
         if (killer != null && !killer.equals(dead)) recentKills.put(dead.getUniqueId(), killer.getUniqueId());
+        // Свой погиб: там опасно - отряд это запоминает.
+        int deadTeam = hooks.teamIdOf(dead.getUniqueId());
+        if (deadTeam >= 0 && teamThreat.containsKey(deadTeam))
+            teamThreat.get(deadTeam).add(dead.getLocation().getX(), dead.getLocation().getZ(), 4.0, tick);
         Bot b = bots.get(dead.getUniqueId());
         if (b == null) return;
         if (skill.debug) {
@@ -489,6 +591,11 @@ public final class BotManager implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onDamage(EntityDamageEvent e) {
+        if (bots.isEmpty()) return;
+        if (e.getEntity() instanceof LivingEntity) {
+            LivingEntity by = source(e instanceof EntityDamageByEntityEvent ? ((EntityDamageByEntityEvent) e).getDamager() : null);
+            for (Bot lb : bots.values()) lb.onTargetHurt((LivingEntity) e.getEntity(), by, e.getFinalDamage());
+        }
         if (!(e.getEntity() instanceof Player)) return;
         Player victim = (Player) e.getEntity();
         Entity damager = (e instanceof EntityDamageByEntityEvent) ? ((EntityDamageByEntityEvent) e).getDamager() : null;
@@ -563,12 +670,17 @@ public final class BotManager implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onShot(PlayerInteractEvent e) {
         if (bots.isEmpty()) return;
-        if (e.getAction() != Action.RIGHT_CLICK_AIR && e.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        if (e.getAction() == Action.PHYSICAL) return;
         ItemStack it = e.getItem();
         if (it == null) return;
+        boolean right = e.getAction() == Action.RIGHT_CLICK_AIR || e.getAction() == Action.RIGHT_CLICK_BLOCK;
         Items.Kind k = Items.kind(it, hooks);
-        if (k != Items.Kind.GUN && k != Items.Kind.LAUNCHER && k != Items.Kind.SPRAYER) return;
-        hear(e.getPlayer(), 56);
+        if (right && (k == Items.Kind.GUN || k == Items.Kind.LAUNCHER || k == Items.Kind.SPRAYER)) { hear(e.getPlayer(), 56); return; }
+        // Автоматы и дробовики ExecutableItems стреляют и с ПКМ, и с ЛКМ - их тоже слышно.
+        if (k == Items.Kind.CUSTOM) {
+            Items.Custom ct = Items.customType(it);
+            if (ct == Items.Custom.AUTO || ct == Items.Custom.SHOTGUN) hear(e.getPlayer(), 48);
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

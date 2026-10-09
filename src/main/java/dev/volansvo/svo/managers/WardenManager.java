@@ -212,6 +212,14 @@ public class WardenManager {
         nukeOwnerUid = uid;
     }
 
+    /** Хаос поменял инвентари местами: кнопка переехала - владелец тоже. */
+    public void onInventoriesSwapped(Player a, Player b) {
+        if (rocketLaunched || !wardenDead || nukeFreeForAll) return;
+        GameManager gm = plugin.getGameManager();
+        if (gm.hasNukeButton(a)) nukeOwnerUid = a.getUniqueId();
+        else if (gm.hasNukeButton(b)) nukeOwnerUid = b.getUniqueId();
+    }
+
     /** Кнопку выбросили вручную - владельца больше нет (на земле, подберёт - станет владельцем). */
     public void onNukeDropped(UUID uid) {
         if (nukeOwnerUid != null && nukeOwnerUid.equals(uid)) nukeOwnerUid = null;

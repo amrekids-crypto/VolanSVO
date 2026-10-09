@@ -94,11 +94,12 @@ public class VolanSVO extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        if (miniDrones != null) miniDrones.shutdown();
-        if (gameManager != null) gameManager.forceStop();
-        if (botManager != null) botManager.shutdown();
-        if (bossbarManager != null) bossbarManager.cleanup();
-        if (statsManager != null) statsManager.saveAll();
+        // Каждый шаг отдельно: ошибка в одном не должна помешать сохранить статистику и знания ботов.
+        try { if (miniDrones != null) miniDrones.shutdown(); } catch (Throwable t) { getLogger().warning("shutdown drones: " + t); }
+        try { if (gameManager != null) gameManager.forceStop(); } catch (Throwable t) { getLogger().warning("shutdown game: " + t); }
+        try { if (botManager != null) botManager.shutdown(); } catch (Throwable t) { getLogger().warning("shutdown bots: " + t); }
+        try { if (bossbarManager != null) bossbarManager.cleanup(); } catch (Throwable t) { getLogger().warning("shutdown bossbars: " + t); }
+        try { if (statsManager != null) statsManager.saveAll(); } catch (Throwable t) { getLogger().warning("shutdown stats: " + t); }
         getLogger().info("VolanSVO disabled.");
     }
 

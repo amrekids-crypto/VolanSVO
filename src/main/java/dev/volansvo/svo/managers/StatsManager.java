@@ -50,16 +50,65 @@ public class StatsManager {
     public void save(SvoPlayer sp) {
         // Боты статистику не ведут.
         if (plugin.getBotManager() != null && plugin.getBotManager().isBot(sp.getUuid())) return;
+        put(sp);
+        flushLater();
+    }
+
+    /** Все из кэша - одной записью файла (раньше файл перезаписывался на каждого игрока). */
+    public void saveAll() {
+        for (SvoPlayer sp : cache.values()) {
+            if (plugin.getBotManager() != null && plugin.getBotManager().isBot(sp.getUuid())) continue;
+            put(sp);
+        }
+        // Плагин выключается - пишем сразу (планировщик уже не работает), иначе - в фоне.
+        if (plugin.isEnabled()) flushLater(); else flushNow();
+    }
+
+    private void put(SvoPlayer sp) {
         String path = sp.getUuid().toString();
         statsConfig.set(path + ".name",  sp.getName());
         statsConfig.set(path + ".games", sp.getTotalGames());
         statsConfig.set(path + ".wins",  sp.getTotalWins());
         statsConfig.set(path + ".kills", sp.getTotalKills());
-        try { statsConfig.save(statsFile); } catch (IOException e) { e.printStackTrace(); }
     }
 
-    public void saveAll() {
-        for (SvoPlayer sp : cache.values()) save(sp);
+    private boolean flushQueued;
+
+    /** Записать файл в конце тика: несколько убийств за тик - одна запись, и не в основном потоке. */
+    private void flushLater() {
+        if (flushQueued) return;
+        flushQueued = true;
+        try {
+            plugin.getServer().getScheduler().runTask(plugin, () -> {
+                flushQueued = false;
+                final String data = statsConfig.saveToString();
+                final File f = statsFile;
+                final long seq = ++snapshotSeq;
+                plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> write(f, data, seq));
+            });
+        } catch (Throwable t) {
+            // Плагин выключается - планировщик не принимает задачи, пишем сразу.
+            flushQueued = false;
+            flushNow();
+        }
+    }
+
+    private void flushNow() {
+        write(statsFile, statsConfig.saveToString(), ++snapshotSeq);
+    }
+
+    /** Номер снимка: запись в фоне, начатая раньше, не затрёт более свежий файл. */
+    private long snapshotSeq;
+    private static long writtenSeq;
+
+    private static synchronized void write(File f, String data, long seq) {
+        if (seq <= writtenSeq) return;
+        writtenSeq = seq;
+        try {
+            java.nio.file.Files.write(f.toPath(), data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     public SvoPlayer get(UUID uid) { return cache.get(uid); }

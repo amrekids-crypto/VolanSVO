@@ -44,57 +44,6 @@ public class WorldManager {
     public String getGameWorldName(){ return gameWorldName(); }
 
     /**
-     * Загружает мир если он существует на диске, иначе создаёт через mvclone.
-     * Мир НЕ пересоздаётся если уже существует.
-     */
-    public void ensureGameWorld(final Runnable onReady) {
-        final String gw = gameWorldName();
-        if (Bukkit.getWorld(gw) != null) { onReady.run(); return; }
-
-        File worldFolder = new File(Bukkit.getWorldContainer(), gw);
-        if (worldFolder.exists()) {
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mvload " + gw);
-            Bukkit.getScheduler().runTaskLater(plugin, new Runnable() {
-                @Override public void run() {
-                    if (Bukkit.getWorld(gw) != null) onReady.run();
-                    else cloneWorld(onReady);
-                }
-            }, 60L);
-        } else {
-            cloneWorld(onReady);
-        }
-    }
-
-    /** Публичный вызов клонирования лобби в игровой мир. */
-    public void freshCloneWorld(final Runnable onReady) {
-        cloneWorld(onReady);
-    }
-
-    /** Удаляет текущий игровой мир и создаёт его заново из лобби. */
-    public void recreateGameWorld(final Runnable onReady) {
-        final String gw = gameWorldName();
-        World existing = Bukkit.getWorld(gw);
-        if (existing != null) {
-            World lobby = getLobbyWorld();
-            Location fb = lobby != null ? lobby.getSpawnLocation() : null;
-            for (Player p : existing.getPlayers()) if (fb != null) p.teleport(fb);
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mvdelete " + gw);
-            Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mvconfirm");
-        } else {
-            deleteFolderNamed(gw);
-        }
-        Bukkit.getScheduler().runTaskLater(plugin, new Runnable() {
-            @Override public void run() { cloneWorld(onReady); }
-        }, 120L);
-    }
-
-    private void cloneWorld(final Runnable onReady) {
-        final String src = lobbyWorldName();
-        final String dst = gameWorldName();
-        cloneNamed(src, dst, onReady);
-    }
-
-    /**
      * Клонирует мир КОНКРЕТНОЙ карты (свежий: старый клон удаляется). Используется при
      * смене карты на старте раунда (напр. выбрали Восток - клонируем east -> eastgame_).
      */
@@ -128,9 +77,14 @@ public class WorldManager {
         Bukkit.getScheduler().runTaskLater(plugin, new Runnable() {
             @Override public void run() {
                 Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "mvclone " + src + " " + dst);
-                Bukkit.getScheduler().runTaskLater(plugin, new Runnable() {
+                // Ждём, пока клон загрузится: на медленном диске 3 секунд не хватало, и старт
+                // отменялся с «не удалось создать мир». Проверяем раз в секунду до 20 секунд.
+                new org.bukkit.scheduler.BukkitRunnable() {
+                    int waited = 0;
                     @Override public void run() {
                         World w = Bukkit.getWorld(dst);
+                        if (w == null && (waited += 20) < 400) return;
+                        cancel();
                         if (w != null) {
                             w.setDifficulty(Difficulty.EASY);
                             w.setTime(6000);
@@ -138,7 +92,7 @@ public class WorldManager {
                         }
                         onReady.run();
                     }
-                }, 60L);
+                }.runTaskTimer(plugin, 60L, 20L);
             }
         }, 40L);
     }
