@@ -491,6 +491,7 @@ public final class Bot {
         ladderUntil = -1;
         glanceUntil = -1;
         craftUntil = -1;
+        tableGround = null;
         planPoint = null;
         planHoldSince = -1;
         commitUntil = 0;
@@ -518,7 +519,8 @@ public final class Bot {
     /** Цель, на которой бот изучает предмет, ранил кто-то другой (или что-то другое). */
     void onTargetHurt(LivingEntity victim, LivingEntity by, double damage) {
         if (learnKey == null || victim != learnTarget) return;
-        if (by != null && by.getUniqueId().equals(id)) return;
+        // Урон без источника (огонь, урон самого предмета со временем) - может быть от нашего предмета.
+        if (by == null || by.getUniqueId().equals(id)) return;
         learnOther += damage;
     }
 
@@ -705,6 +707,9 @@ public final class Bot {
             if (goalSwitchAt < 0) goalSwitchAt = now + timing.decide();
             if (now < goalSwitchAt) goal = prev; else goalSwitchAt = -1;
         } else goalSwitchAt = -1;
+        // Ушли от открытого сундука (бой, другое дело): закрываем его - иначе следующий сундук
+        // бот «лутал» бы как уже открытый, не подходя к нему.
+        if (chestOpenAt >= 0 && goal != Goal.LOOT && goal != Goal.AIRDROP) closeOpenChest(p);
         // В финале логово Жириновского у центра не обходим: туда и надо.
         Warden boss = goal == Goal.WARDEN || finale() ? null : hooks.warden();
         boolean bossHere = boss != null && boss.getWorld().equals(p.getWorld());
@@ -1332,8 +1337,23 @@ public final class Bot {
         }
         // Крафтим: стоим, смотрим в инвентарь (или на верстак).
         if (now < craftUntil) {
-            if (target != null && target.visible) craftUntil = -1;
-            else {
+            if (target != null && target.visible) { craftUntil = -1; tableGround = null; }
+            else if (tableGround != null) {
+                motor.stop(p);
+                int ts = -1;
+                for (int i = 0; i < 36 && ts < 0; i++) {
+                    ItemStack it = p.getInventory().getItem(i);
+                    if (it != null && it.getType() == Material.CRAFTING_TABLE && !it.hasItemMeta()) ts = i;
+                }
+                if (ts >= 0 && builder.useOnFace(p, tableGround, BlockFace.UP, ts)) {
+                    note(name + " ставит верстак");
+                    tableFails++;
+                    tableGround = null;
+                    craftUntil = now + 6;
+                    nextCraft = now + 10;
+                } else if (ts < 0 || !builder.turning()) { tableGround = null; craftUntil = -1; nextCraft = now + 20 * 30; }
+                return;
+            } else {
                 motor.stop(p);
                 if (craftLook != null && craftLook.getWorld().equals(p.getWorld())) motor.turn(p, yawTo(p, craftLook), pitchTo(p, craftLook), 15f);
                 else motor.turn(p, motor.yaw(), 40f, 10f);
@@ -1383,6 +1403,8 @@ public final class Bot {
                 && climbStep(p, now)) return;
 
         // Лезем по стене на лестницах.
+        // Бьют на лестнице - не лезем дальше, а отвечаем.
+        if (now < ladderUntil && target != null && target.visible && now - lastHurt < 20) { ladderUntil = -1; ladderBanUntil = now + 20 * 10; }
         if (now < ladderUntil && goal != Goal.DROP && goal != Goal.DODGE && goal != Goal.EVADE) {
             if (builder.ladderClimb(p, ladderDx, ladderDz, ladderTop, now)) return;
             ladderUntil = -1;
@@ -1580,6 +1602,9 @@ public final class Bot {
                 }
                 // Путь к нему есть и мы ещё не дошли - идём по пути; искать обзор, когда пришли или пути нет.
                 boolean pathOn = nav.hasPath() && nav.reaches() && !nav.arrived(p, 2.5);
+                // Только что спрятался за укрытием рядом - закидываем гранатой.
+                if (!target.visible && target.last.getWorld().equals(loc.getWorld())
+                        && throwAtHidden(p, now, target, target.last.distance(loc))) return;
                 if (!target.visible && !pathOn && seekLineOfSight(p, now, target.entity)) return;
                 if (target == null) break;
                 nav.setGoal(target.last, 2);
@@ -4235,8 +4260,11 @@ public final class Bot {
     /** Заранее достаёт оружие под дистанцию, пока идёт к врагу. */
     private void prepareWeapon(Player p, double d) {
         int now = mgr.now();
-        if (now < busyUntil) return;
-        int slot = weaponSlot(p, chooseWeapon(p, d, now));
+        if (now < busyUntil || glancing(now)) return; // смотрит на карту - оружие потом
+        Weapon w = chooseWeapon(p, d, now);
+        // Ждём врага с гранатой в руке только если она и так в руке: иначе ствол (без метаний туда-сюда).
+        if (w == Weapon.THROW && (target == null || !target.visible)) w = chooseWeapon(p, 30, now);
+        int slot = weaponSlot(p, w);
         if (slot >= 0) hold(p, slot, now);
     }
 
@@ -4678,9 +4706,27 @@ public final class Bot {
      * от глаз), видеть сам сундук (не сквозь стену), крышка не придавлена. Замурованный сундук
      * бот прокапывает, придавленный - освобождает. true - бот занят этим (копает или наводится).
      */
+    /** Какой сундук сейчас открыт (ключ), чтобы открытым не считался другой. */
+    private long openChestKey = Long.MIN_VALUE;
+
+    /** Закрыть открытый сундук и забыть, что он открыт. */
+    private void closeOpenChest(Player p) {
+        if (chestOpenAt < 0) return;
+        chestOpenAt = -1;
+        if (openChestKey == Long.MIN_VALUE) return;
+        int x = (int) (openChestKey >> 38), y = (int) (openChestKey << 52 >> 52), z = (int) (openChestKey << 26 >> 38);
+        openChestKey = Long.MIN_VALUE;
+        Block b = p.getWorld().getBlockAt(x, y, z);
+        if (!p.getWorld().isChunkLoaded(x >> 4, z >> 4)) return;
+        BlockState st = b.getState();
+        if (st instanceof Lidded) ((Lidded) st).close();
+    }
+
     private boolean lootChest(Player p, int now) {
         World w = p.getWorld();
         Location c = new Location(w, chest[0] + 0.5, chest[1] + 0.5, chest[2] + 0.5);
+        // «Открыт» другой сундук (этот сменили) или мы отошли - открытым его не считаем.
+        if (chestOpenAt >= 0 && (key(chest) != openChestKey || p.getEyeLocation().distance(c) > 4.6)) closeOpenChest(p);
         if (!w.isChunkLoaded(chest[0] >> 4, chest[2] >> 4)) return false;
         Block b = w.getBlockAt(chest[0], chest[1], chest[2]);
         BlockState st = b.getState();
@@ -4714,6 +4760,7 @@ public final class Bot {
             if (!motor.aim(p, yawTo(p, c), pitchTo(p, c), 10f)) return true;
             if (st instanceof Lidded) ((Lidded) st).open();
             chestOpenAt = now;
+            openChestKey = key(chest);
             chestNoSee = -1;
             return true;
         }
@@ -6442,7 +6489,7 @@ public final class Bot {
         }
         eiNeedsReload = false;
         if (slot < 0 || !hold(p, slot, now)) return;
-        if (skill.reloadLookUp && !motor.aim(p, motor.yaw(), -55f, 8f)) { nextEiCheck = now; return; }
+        if (skill.reloadLookUp && !motor.aim(p, motor.yaw(), -55f, 8f)) { nextEiCheck = now; eiNeedsReload = true; return; }
         BotNms.clickAir(p);
         // Патроны встают в магазин сразу по клику, дальше у ствола только задержка выстрела.
         busyUntil = now + 6;
@@ -7090,7 +7137,10 @@ public final class Bot {
      */
     private void holdPosition(Player p, int now) {
         if (gadgetStep(p, now)) return;
-        if (gadgetSpot == null && now >= nextGadget && rnd.nextDouble() < persona.gadgets) planGadget(p, now);
+        if (gadgetSpot == null && now >= nextGadget) {
+            if (rnd.nextDouble() < persona.gadgets) planGadget(p, now);
+            else nextGadget = now + 20 * (10 + rnd.nextInt(20)); // в этот раз не стал - решит позже
+        }
         motor.stop(p);
         boolean crouch = (persona.type == Persona.Archetype.MARKSMAN || persona.type == Persona.Archetype.TACTICIAN
             || persona.type == Persona.Archetype.SURVIVOR) && persona.patience > 0.35
@@ -7196,7 +7246,9 @@ public final class Bot {
 
     // =====================================================================  крафт
 
-    private int craftUntil = -1, nextCraft;
+    private int craftUntil = -1, nextCraft, tableFails;
+    /** Куда ставим верстак (опора), пока доворачиваем голову; null - не ставим. */
+    private Block tableGround;
     private Location craftLook;
 
     /**
@@ -7223,6 +7275,7 @@ public final class Bot {
             || persona.type == Persona.Archetype.MARKSMAN || pitMode || finale();
         if (Builder.ladderCount(p) >= 4 || planks < (climber ? 8 : 16)) return;
         Block table = nearbyTable(p);
+        if (table != null) tableFails = 0;
         if (table == null) {
             int ts = -1;
             for (int i = 0; i < 36 && ts < 0; i++) {
@@ -7233,11 +7286,14 @@ public final class Bot {
                 if (planks >= 12 && Crafting.table(w, inv)) craftUntil = now + 10 + rnd.nextInt(8);
                 return;
             }
+            // Поставили, а верстака нет (не дал сервер) - пару раз, потом надолго бросаем.
+            if (tableFails >= 2) { nextCraft = now + 20 * 120; tableFails = 0; return; }
             Block ground = tableSpot(p);
-            if (ground != null && builder.useOnFace(p, ground, org.bukkit.block.BlockFace.UP, ts)) {
-                note(name + " ставит верстак");
-                craftUntil = now + 6;
-            }
+            if (ground == null) { nextCraft = now + 20 * 10; return; }
+            // Ставим из act: голову доворачиваем за несколько тиков, стоя на месте.
+            tableGround = ground;
+            craftUntil = now + 30;
+            craftLook = null;
             return;
         }
         int guard = 0;
