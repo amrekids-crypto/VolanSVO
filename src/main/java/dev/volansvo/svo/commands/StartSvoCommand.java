@@ -16,11 +16,6 @@ public class StartSvoCommand implements CommandExecutor {
     private static final long COOLDOWN_MS = 5 * 60 * 1000L;
     private long lastUsed = 0L;
 
-    // Маркерный блок: в свежем игровом мире должен быть AIR
-    private static final int MARKER_X = -578;
-    private static final int MARKER_Y = 312;
-    private static final int MARKER_Z = 453;
-
     public StartSvoCommand(VolanSVO plugin) {
         this.plugin = plugin;
     }
@@ -57,7 +52,10 @@ public class StartSvoCommand implements CommandExecutor {
             + ChatColor.GRAY + " в руке - открыть меню запуска игры.");
         // Первый в очереди - глобальный анонс с кликабельной кнопкой (вместо текста "/svolobby") -
         // клик от имени игрока выполняет /svolobby.
-        if (wasFirst) {
+        // Не чаще раза в 5 минут: иначе вход-выход из очереди спамил анонсом весь сервер.
+        long nowMs = System.currentTimeMillis();
+        if (wasFirst && nowMs - lastUsed >= COOLDOWN_MS) {
+            lastUsed = nowMs;
             String tellraw = "tellraw @a [\"\""
                 + ",{\"text\":\"СВО началось! \",\"bold\":true,\"color\":\"gold\"}"
                 + ",{\"text\":\"[ПРИСОЕДИНИТЬСЯ]\",\"color\":\"aqua\",\"bold\":true"

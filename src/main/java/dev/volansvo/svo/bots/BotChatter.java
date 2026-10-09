@@ -21,13 +21,14 @@ final class BotChatter {
         // ---- ответы игрокам
         R_BOT_DENY, R_BOT_ADMIT, R_GG, KILL_AGAIN,
         // ---- командный чат
-        T_LOW_HP, T_SHARE, T_ACK, T_HELP, T_DODGE, T_EVADE, T_RELOAD, T_CAVE, T_WARDEN, T_VEHICLE, T_HEAL, T_LOOT_TO_YOU, T_NO_ITEMS
+        T_LOW_HP, T_SHARE, T_ACK, T_HELP, T_DODGE, T_EVADE, T_RELOAD, T_CAVE, T_WARDEN, T_VEHICLE, T_HEAL, T_LOOT_TO_YOU, T_NO_ITEMS, T_CALLOUT
     }
 
     static final Map<Topic, String[]> LINES = new EnumMap<Topic, String[]>(Topic.class);
 
     static {
         LINES.put(Topic.KILL, new String[]{
+            "соси быдло",
             "изи",
             "ИЗИ КАТКА",
             "{v}, изи",
@@ -134,6 +135,7 @@ final class BotChatter {
             "Тиммейт, это для тебя",
         });
         LINES.put(Topic.DEATH_BY_PLAYER, new String[]{
+            "я 200", "не стоило играть с той лисичкой....",
             "{k}, читер!!! Репорт",
             "ЛАГИ!!!",
             "Я с телефона вообще-то",
@@ -218,6 +220,7 @@ final class BotChatter {
             "{k}, тебе повезло, что я один",
         });
         LINES.put(Topic.DEATH_ZONE, new String[]{
+            "я 200",
             "Зона меня догнала. Зона, ты сучка",
             "Я думал, зона подождёт. Она не подождала",
             "Кто сужал эту зону, у вас совесть есть?",
@@ -230,6 +233,7 @@ final class BotChatter {
             "Надо было бежать раньше",
         });
         LINES.put(Topic.DEATH_FALL, new String[]{
+            "я 200",
             "Я думал, это лужа, а это была пропасть",
             "Меня убила гравитация. Гравитация не за ДНР",
             "Прыгнул за мечтой. Мечта была ниже, чем я думал",
@@ -242,6 +246,7 @@ final class BotChatter {
             "Кто убрал ступеньку?",
         });
         LINES.put(Topic.DEATH_EXPLOSION, new String[]{
+            "я 200",
             "Сапёр ошибается один раз. Я ошибся дважды",
             "Бабах! Это был я",
             "Кто положил динамит мне под ноги? Признавайтесь",
@@ -256,6 +261,7 @@ final class BotChatter {
             "Взрывчатку надо держать подальше",
         });
         LINES.put(Topic.DEATH_FIRE, new String[]{
+            "я 200",
             "Горячо, горячо, ГОРЯЧО!",
             "Я теперь шашлык",
             "Зачем я полез в эту лаву, ну зачем",
@@ -281,6 +287,7 @@ final class BotChatter {
             "Жириновский победил, однозначно",
         });
         LINES.put(Topic.DEATH_OTHER, new String[]{
+            "я 200",
             "Умер как герой. Ну, почти как герой",
             "Что это было вообще?",
             "Я даже не понял, кто меня",
@@ -599,6 +606,7 @@ final class BotChatter {
             "Ну всё, это конец",
         });
         LINES.put(Topic.REPLY_DEATH, new String[]{
+            "завали ебало",
             "Ахахах, нуб",
             "Ору",
             "F нубу",
@@ -898,6 +906,13 @@ final class BotChatter {
             "пусто в карманах",
             "нечего дать",
         });
+        // {n} - где враг: «на северо-востоке, метров 40».
+        LINES.put(Topic.T_CALLOUT, new String[]{"Враг {n}!", "Вижу одного {n}", "Контакт {n}", "Там кто-то {n}",
+            "Внимание, противник {n}",
+            "Осторожно, {n} чел",
+            "{n} враг, аккуратно",
+            "Вижу тело {n}",
+        });
         LINES.put(Topic.T_LOOT_TO_YOU, new String[]{"Нёс тебе подарки", "Смотри, что нашёл!", "Это тебе, командир", "Залутал, раздаю",
             "Держи, командир",
             "Принёс лут",
@@ -924,6 +939,7 @@ final class BotChatter {
 
     /** Разговоры ни о чём: вопрос и возможные ответы другого бота. */
     static final String[][] SMALLTALK = {
+        {"сколько у вас сметанки осталось?", "посчитай своим язычком"},
         {"Кто-нибудь видел аптечку?", "Видел. Съел.", "Нет, но если найдёшь, дай мне", "В третьем сундуке слева. Шучу"},
         {"Сколько нас ещё осталось?", "Меньше, чем хотелось бы", "Достаточно, чтобы я победил", "Посчитай сам, я занят"},
         {"Кто стрелял?", "Не я!", "Я. Извини", "Это был Жириновский"},

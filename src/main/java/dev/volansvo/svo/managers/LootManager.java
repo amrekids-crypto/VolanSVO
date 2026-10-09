@@ -23,6 +23,9 @@ public class LootManager {
      *  тиков), запуски раньше накладывались друг на друга и удваивали/утраивали нагрузку.
      *  Пока идёт текущий проход - новый просто не запускаем (следующая смерть перезапустит). */
     private volatile boolean refillInProgress = false;
+    /** Перезаполнение, запрошенное во время идущего прохода (выполним после него). */
+    private World pendingWorld;
+    private dev.volansvo.svo.maps.MapData pendingMap;
 
     /** 254 координаты сундуков (из оригинального place_chests.mcfunction). */
     private static final int[][] CHEST_COORDS = {
@@ -117,7 +120,13 @@ public class LootManager {
      * списки сундуков + темплейтов - используются они, иначе fallback на legacy hardcode.
      */
     public void placeAndFill(World world, dev.volansvo.svo.maps.MapData mapData) {
-        if (refillInProgress) return; // предыдущий проход ещё не закончился - пропускаем, а не накладываем
+        if (refillInProgress) {
+            // Предыдущий проход ещё идёт - не накладываем, но и не теряем: повторим сразу после него
+            // (раньше смерть во время прохода просто не обновляла сундуки).
+            pendingWorld = world;
+            pendingMap = mapData;
+            return;
+        }
         refillInProgress = true;
         try {
             placeAndFillInternal(world, mapData);
@@ -229,6 +238,11 @@ public class LootManager {
                         + ", source=" + source + ")");
                     refillInProgress = false;
                     cancel();
+                    World again = pendingWorld;
+                    dev.volansvo.svo.maps.MapData againMap = pendingMap;
+                    pendingWorld = null;
+                    pendingMap = null;
+                    if (again != null && again.equals(fworld) && plugin.getGameManager().isGameActive()) placeAndFill(again, againMap);
                 }
             }
         }.runTaskTimer(plugin, 1L, 1L);

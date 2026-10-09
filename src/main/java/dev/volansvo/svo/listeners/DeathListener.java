@@ -23,6 +23,12 @@ public class DeathListener implements Listener {
         if (!plugin.getGameManager().isPlayerInGame(player.getUniqueId())) return;
 
         Player killer = player.getKiller();
+        // Убили не прямым ударом (взрыв, плагинное оружие, дрон, падение после удара) -
+        // засчитываем тому, кто бил последним.
+        if (killer == null || killer.equals(player)) {
+            java.util.UUID last = plugin.getGameManager().recentAttacker(player.getUniqueId());
+            killer = last == null ? null : org.bukkit.Bukkit.getPlayer(last);
+        }
         if (killer != null && plugin.getGameManager().isPlayerInGame(killer.getUniqueId())) {
             SvoPlayer ksp = plugin.getGameManager().getSvoPlayer(killer.getUniqueId());
             // Убийства ботами, убийства ботов и игры один-на-ботов в постоянную статистику не идут.
@@ -53,6 +59,8 @@ public class DeathListener implements Listener {
         // Если погибший держал ядерную кнопку - она выпадает на землю.
         plugin.getWardenManager().onNukeHolderDeath(player, event.getDrops(), player.getLocation());
 
+        plugin.getGameManager().noteKill(player.getUniqueId(), killer == null ? null : killer.getUniqueId());
+        plugin.getGameManager().clearCombatTag(player.getUniqueId());
         plugin.getGameManager().eliminatePlayer(player.getUniqueId(), true);
 
         // Обновляем сундуки после смерти каждого игрока (если игра ещё идёт)

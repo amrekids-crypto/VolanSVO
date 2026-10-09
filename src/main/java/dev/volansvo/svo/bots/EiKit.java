@@ -317,11 +317,15 @@ final class EiKit {
     boolean refillNow(Player p, int now) {
         if (restoreOffhandAt >= 0) return true;
         refill(p, now);
-        return restoreOffhandAt >= 0;
+        return restoreOffhandAt >= 0 || refillTurning;
     }
 
     /** Патроны в левую руку, ствол в правую, клик - и обратно. */
+    /** Пополнение не началось только потому, что ещё поднимаем голову. */
+    private boolean refillTurning;
+
     private void refill(Player p, int now) {
+        refillTurning = false;
         PlayerInventory inv = p.getInventory();
         for (int g = 0; g < 36; g++) {
             ItemStack gun = inv.getItem(g);
@@ -335,13 +339,13 @@ final class EiKit {
             int ammo = find(p, ak ? Use.AMMO_AK : Use.AMMO_SHOTGUN);
             if (ammo < 0) continue;
             if (!hold.test(g) || inv.getHeldItemSlot() != g) return;
+            // Клик в воздух повыше: голову поднимаем не рывком (за тик не больше 50 градусов).
+            if (!motor.aim(p, motor.yaw(), -55f, 8f)) { refillTurning = true; return; }
             ItemStack pkt = inv.getItem(ammo);
             savedOffhand = inv.getItemInOffHand();
             if (savedOffhand != null && savedOffhand.getType().isAir()) savedOffhand = null;
             inv.setItem(ammo, null);
             inv.setItemInOffHand(pkt);
-            BotNms.look(p, motor.yaw(), -55f); // клик в воздух
-            motor.sync(p);
             BotNms.clickAir(p);
             restoreOffhandAt = now + 3;
             if (mgr.skill().debug) mgr.debug(name + " пополняет патроны " + ct);

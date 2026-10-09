@@ -95,6 +95,39 @@ public final class BotNms {
         return (h instanceof BotPlayer) ? (BotPlayer) h : null;
     }
 
+    /**
+     * Сам предмет в слоте инвентаря (объект сервера, а не копия Bukkit): пока слот не
+     * перекладывали, это тот же объект. По нему бот узнаёт, что вещь в слоте не менялась.
+     */
+    public static Object rawItem(Player p, int slot) {
+        BotPlayer bot = handle(p);
+        if (bot == null) return null;
+        try { return bot.getInventory().getItem(slot); } catch (Throwable t) { return null; }
+    }
+
+    private static java.lang.reflect.Field latencyField;
+    private static boolean latencySearched;
+
+    /**
+     * Пинг в табе. У бота нет соединения, и сервер показывал 0 мс - сразу видно, что не человек.
+     * Ставим правдоподобный пинг; не вышло (другая версия сервера) - молча оставляем как есть.
+     */
+    public static void setLatency(Player p, int ms) {
+        BotPlayer bot = handle(p);
+        if (bot == null || bot.connection == null) return;
+        try {
+            if (!latencySearched) {
+                latencySearched = true;
+                for (Class<?> c = bot.connection.getClass(); c != null && latencyField == null; c = c.getSuperclass()) {
+                    for (java.lang.reflect.Field f : c.getDeclaredFields()) {
+                        if (f.getName().equals("latency") && f.getType() == int.class) { f.setAccessible(true); latencyField = f; break; }
+                    }
+                }
+            }
+            if (latencyField != null) latencyField.setInt(bot.connection, ms);
+        } catch (Throwable ignored) {}
+    }
+
     // ---------------------------------------------------------------- движение
 
     public static void input(Player p, float forward, float strafe, boolean jump) {

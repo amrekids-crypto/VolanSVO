@@ -107,7 +107,7 @@ final class DronePilot {
 
     private void flyFpv(Player p, int now) {
         Location pos = p.getLocation();
-        if (!validTarget(target, pos)) target = nearestEnemy(pos, 160);
+        if (!validTarget(target, pos)) target = nearestSeen(p, 160);
         if (target == null || now - since > 20 * 38) { BotNms.sprint(p, false); return; }
         Location dest = target.getLocation().add(lead(target).multiply(6 * leadK)).add(0, 1.0, 0);
         Vector to = dest.toVector().subtract(pos.toVector());
@@ -128,7 +128,7 @@ final class DronePilot {
 
     private void flyBomber(Player p, int now) {
         Location pos = p.getLocation();
-        if (!validTarget(target, pos)) target = nearestEnemy(pos, 140);
+        if (!validTarget(target, pos)) target = nearestSeen(p, 140);
         if (target == null || drops >= 3 || now - since > 20 * 13) { BotNms.sneak(p, false); return; }
         Location t = target.getLocation().add(lead(target).multiply(4 * leadK));
         World w = pos.getWorld();
@@ -173,15 +173,24 @@ final class DronePilot {
             && t.getWorld().equals(from.getWorld()) && hooks.inGame(t.getUniqueId());
     }
 
-    Player nearestEnemy(Location from, double radius) {
+    /** Можно ли пускать дрон в этого врага: рядом с ним нет своих (взрыв заденет и их). */
+    boolean safeTarget(Player o) {
+        return o != null && !teammateNear(o.getLocation(), 8);
+    }
+
+    /** Новая цель с камеры дрона: только тех, кого из дрона видно (или кто совсем рядом). */
+    private Player nearestSeen(Player pilot, double radius) {
+        Location from = pilot.getLocation();
         Player best = null;
         double bd = radius * radius;
         for (Player o : hooks.alivePlayers()) {
             if (o.getUniqueId().equals(self) || o.getGameMode() != GameMode.SURVIVAL) continue;
             if (!o.getWorld().equals(from.getWorld()) || hooks.sameTeam(self, o.getUniqueId())) continue;
-            double dx = o.getLocation().getX() - from.getX(), dz = o.getLocation().getZ() - from.getZ();
-            double d = dx * dx + dz * dz;
-            if (d < bd && !teammateNear(o.getLocation(), 8)) { bd = d; best = o; }
+            double d = o.getLocation().distanceSquared(from);
+            if (d >= bd || teammateNear(o.getLocation(), 8)) continue;
+            if (d > 24 * 24 && !pilot.hasLineOfSight(o)) continue;
+            bd = d;
+            best = o;
         }
         return best;
     }

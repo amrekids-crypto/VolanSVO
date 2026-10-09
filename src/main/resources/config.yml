@@ -68,6 +68,42 @@ bots:
     fpv: [bfpv, fpv, камикадз, kamikaz]
     bomber: [bombsender, бомбил, bomber, бомбер]
     ammo: [патрон, ammo, пули, magazine, магазин, дробь]
+  # Ставящиеся предметы (MilitaryCraft по id предмета, ExecutableItems-мина сама): кусок id.
+  # Мины и растяжки ставит в основном класс «Тактик» (засады, у сундука, при отходе), турель -
+  # на занятой позиции лицом к подходу.
+  deployables:
+    mine: [mine, claymore, мина]
+    turret: [turret, machine_gun, machinegun, sentry, tripod, mounted, пулем, турел]
+    trap: [tripwire, trip_wire, trap, растяж, ловушк]
+  # Насколько боты отличаются друг от друга мастерством (0 - все одинаковые, 1 - обычно,
+  # 1.5 - заметный разброс). Уровень, характер, класс и план у каждого бота свои и зависят от
+  # ника (класс и характер) и от матча (план) - отдельной «сложности» нет.
+  skill-spread: 1.0
+  # Прыжки на бегу, как у игроков (быстрее, но заметнее).
+  sprint-jump: true
+  # Поиск пути: smart - свой поиск (обходы, проходы), dig/place - ломать и ставить блоки по пути,
+  # parkour - прыжки через ямы, budget-ms - сколько миллисекунд за тик на поиск пути у всех ботов.
+  nav:
+    smart: true
+    dig: true
+    place: true
+    parkour: true
+    budget-ms: 3.0
+  # «Человечность»: aim - прицел с отставанием и доводкой, attention - конус зрения и оглядки,
+  # chat-style - опечатки и манера письма, chat-commands - понимают «иди за мной»/«дай»,
+  # memory - помнят обидчиков между матчами, trails - ходят тропами игроков,
+  # mirror - повторяют присед/прыжки в ответ, loot-by-one - берут из сундука по одной вещи,
+  # reload-look-up - перезаряжая плагинный ствол, смотрят вверх.
+  human:
+    aim: true
+    attention: true
+    chat-style: true
+    chat-commands: true
+    memory: true
+    trails: true
+    mirror: true
+    loot-by-one: true
+    reload-look-up: false
   # Ники ботов (пусто - встроенный список).
   names: []
   # Ники аккаунтов Minecraft, чьи скины берут боты (пусто - встроенный список).

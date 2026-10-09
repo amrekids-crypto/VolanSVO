@@ -29,7 +29,9 @@ public final class Items {
 
     public enum Kind {
         NONE, MELEE, BOW, CROSSBOW, TRIDENT, GUN, LAUNCHER, THROW_DAMAGE, THROW_UTILITY, SPRAYER,
-        HEAL, FOOD, ARMOR, SHIELD, TOTEM, PEARL, SPLASH_HARM, BUFF, MILK, NUKE, CUSTOM
+        HEAL, FOOD, ARMOR, SHIELD, TOTEM, PEARL, SPLASH_HARM, BUFF, MILK, NUKE, CUSTOM,
+        /** Ставящееся: мина, турель, растяжка (см. Gadgets). */
+        GADGET
     }
 
     /** Чем является плагинный предмет (ExecutableItems и т.п.), узнаём по его id и названию. */
@@ -175,6 +177,8 @@ public final class Items {
         String n = m.name();
         // Телекинетик (EI): им бьют врага, и в цель летят камни. Для бота это оружие ближнего боя.
         if (isTelekinetic(it)) return Kind.MELEE;
+        // Плагинная броня не на «бронном» материале (голова, тыква с атрибутами...) - тоже броня.
+        if (!isArmor(m) && it.hasItemMeta() && armorSlotOf(it) != null && armorValue(it) > 0.5) return Kind.ARMOR;
         // Плагинные стволы часто сделаны из мотыги/лука/арбалета - сначала смотрим, не они ли это.
         if (isCustom(it) && !n.endsWith("_SWORD") && !n.endsWith("_AXE") && !isArmor(m)
                 && !((m == Material.BOW || m == Material.CROSSBOW || m == Material.SHIELD || m == Material.TRIDENT)
@@ -217,7 +221,8 @@ public final class Items {
             case "combat_stim": return Kind.BUFF;
             case "trench_shovel": return Kind.MELEE;
             default:
-                if (isArmor(it.getType())) return Kind.ARMOR;
+                if (isArmor(it.getType()) || armorSlotOf(it) != null) return Kind.ARMOR;
+                if (Gadgets.typeOf(it) != null) return Kind.GADGET;
                 return Kind.NONE; // развёртываемое (пулемёт, мины, растяжки) боту не нужно
         }
     }
@@ -330,30 +335,96 @@ public final class Items {
         return dmg;
     }
 
-    /** Защитная ценность предмета брони. */
+    /**
+     * Слот брони предмета: по материалу (шлем, нагрудник...), а у плагинной брони на другом
+     * материале (голова, тыква-шлем с атрибутами и т.п.) - по компоненту «надеваемый» или по
+     * атрибутам брони на слот. null - это не броня.
+     */
+    public static EquipmentSlot armorSlotOf(ItemStack it) {
+        if (it == null || it.getType().isAir()) return null;
+        EquipmentSlot s = armorSlot(it.getType());
+        if (s != null) return s;
+        if (!it.hasItemMeta()) return null;
+        ItemMeta m = it.getItemMeta();
+        try {
+            if (m.hasEquippable()) {
+                EquipmentSlot e = m.getEquippable().getSlot();
+                if (e == EquipmentSlot.HEAD || e == EquipmentSlot.CHEST || e == EquipmentSlot.LEGS || e == EquipmentSlot.FEET) return e;
+            }
+        } catch (Throwable ignored) {}
+        if (m.hasAttributeModifiers()) {
+            for (EquipmentSlot e : new EquipmentSlot[]{EquipmentSlot.HEAD, EquipmentSlot.CHEST, EquipmentSlot.LEGS, EquipmentSlot.FEET}) {
+                for (Attribute a : new Attribute[]{Attribute.ARMOR, Attribute.ARMOR_TOUGHNESS}) {
+                    Collection<AttributeModifier> c = m.getAttributeModifiers(a);
+                    if (c == null) continue;
+                    for (AttributeModifier am : c) if (am.getSlotGroup().test(e) && am.getAmount() > 0) return e;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Защитная ценность предмета брони (с учётом плагинной брони и лишнего здоровья). */
     public static double armorValue(ItemStack it) {
         if (it == null || it.getType().isAir()) return 0;
         // Пояс шахида как броню не надеваем: двойной присед рядом с врагом его взрывает.
         if ("suicide_vest".equals(warkitId(it))) return 0;
-        EquipmentSlot slot = armorSlot(it.getType());
+        EquipmentSlot slot = armorSlotOf(it);
         if (slot == null) return 0;
-        double armor = 0, tough = 0;
-        for (AttributeModifier am : modifiers(it, Attribute.ARMOR, slot))
+        double armor = 0, tough = 0, hp = 0, kb = 0;
+        for (AttributeModifier am : slotModifiers(it, Attribute.ARMOR, slot))
             if (am.getOperation() == AttributeModifier.Operation.ADD_NUMBER) armor += am.getAmount();
-        for (AttributeModifier am : modifiers(it, Attribute.ARMOR_TOUGHNESS, slot))
+        for (AttributeModifier am : slotModifiers(it, Attribute.ARMOR_TOUGHNESS, slot))
             if (am.getOperation() == AttributeModifier.Operation.ADD_NUMBER) tough += am.getAmount();
-        double v = armor + tough * 0.6;
+        for (AttributeModifier am : slotModifiers(it, Attribute.MAX_HEALTH, slot))
+            if (am.getOperation() == AttributeModifier.Operation.ADD_NUMBER) hp += am.getAmount();
+        for (AttributeModifier am : slotModifiers(it, Attribute.KNOCKBACK_RESISTANCE, slot))
+            if (am.getOperation() == AttributeModifier.Operation.ADD_NUMBER) kb += am.getAmount();
+        // Плагинная броня на обычном материале без своих атрибутов: защищает сам плагин, а для
+        // бота это как минимум та же броня, что у материала (и чуть лучше - её не зря делали).
+        if (armor <= 0 && tough <= 0 && isArmor(it.getType()) && isCustom(it)) {
+            for (AttributeModifier am : defaultModifiers(it, Attribute.ARMOR, slot)) armor += am.getAmount();
+            for (AttributeModifier am : defaultModifiers(it, Attribute.ARMOR_TOUGHNESS, slot)) tough += am.getAmount();
+            armor += 1;
+        }
+        double v = armor + tough * 0.6 + hp * 0.5 + kb * 2;
         v += it.getEnchantmentLevel(Enchantment.PROTECTION) * 0.9;
         v += it.getEnchantmentLevel(Enchantment.PROJECTILE_PROTECTION) * 0.4;
         v += it.getEnchantmentLevel(Enchantment.BLAST_PROTECTION) * 0.4;
+        v += it.getEnchantmentLevel(Enchantment.FIRE_PROTECTION) * 0.2;
         if (it.getType() == Material.CARVED_PUMPKIN) v = 0;
+        if (it.getEnchantmentLevel(Enchantment.BINDING_CURSE) > 0) v -= 3; // не снять
         // Почти сломанная броня хуже целой.
         short max = it.getType().getMaxDurability();
         if (max > 0 && it.getItemMeta() instanceof org.bukkit.inventory.meta.Damageable) {
             int dmg = ((org.bukkit.inventory.meta.Damageable) it.getItemMeta()).getDamage();
             if (dmg > max * 0.9) v *= 0.4;
         }
-        return v;
+        return Math.max(0, v);
+    }
+
+    /** Модификаторы атрибута, которые действуют, когда предмет надет в этот слот. */
+    private static Collection<AttributeModifier> slotModifiers(ItemStack it, Attribute attr, EquipmentSlot slot) {
+        java.util.List<AttributeModifier> out = new java.util.ArrayList<AttributeModifier>();
+        ItemMeta m = it.getItemMeta();
+        if (m != null && m.hasAttributeModifiers()) {
+            Collection<AttributeModifier> c = m.getAttributeModifiers(attr);
+            if (c != null) for (AttributeModifier am : c) {
+                try { if (!am.getSlotGroup().test(slot)) continue; } catch (Throwable ignored) {}
+                out.add(am);
+            }
+            return out;
+        }
+        return defaultModifiers(it, attr, slot);
+    }
+
+    private static Collection<AttributeModifier> defaultModifiers(ItemStack it, Attribute attr, EquipmentSlot slot) {
+        try {
+            Collection<AttributeModifier> c = it.getType().getDefaultAttributeModifiers(slot).get(attr);
+            return c == null ? java.util.Collections.<AttributeModifier>emptyList() : c;
+        } catch (Throwable t) {
+            return java.util.Collections.emptyList();
+        }
     }
 
     /** Насколько бот хочет держать предмет (для подбора и выбора, что взять из сундука). */
@@ -379,6 +450,7 @@ public final class Items {
             case SPLASH_HARM: return 16;
             case BUFF: return 10;
             case MILK: return 3;
+            case GADGET: return 18;
             case CUSTOM: {
                 switch (customType(it)) {
                     case AUTO: return 65;

@@ -142,6 +142,8 @@ public final class Navigator {
     public boolean desperate;
     /** Зона едет: на сколько блоков от края она продвинется, пока мы идём (клетки там дороже). */
     public double zoneMargin;
+    /** Добавочная цена клетки по тому, как там опасно (жар врагов): осторожный бот обходит. null - не учитываем. */
+    java.util.function.DoubleBinaryOperator threatCost;
     /** Открыть дверь или калитку на пути (руками бота, ПКМ). */
     java.util.function.Predicate<Block> opener;
     private int unstuckTicks = 0;
@@ -309,7 +311,14 @@ public final class Navigator {
         if (hasPath()) {
             advance(pos, onGround);
             if (idx >= steps.size()) {
-                if (!reaches && !arrived(p, Math.max(1.5, accuracy))) { steps = null; return m; }
+                if (!reaches && !arrived(p, Math.max(1.5, accuracy))) {
+                    // Обрывок пути кончился, а к цели почти не приблизились: это тупик, а не этап
+                    // длинной дороги. Раньше такое не считалось неудачей - бот вставал в конце
+                    // обрывка и стоял (так боты и не доходили до центра в финале).
+                    if (flatTo(pos) > pathStartDist - 6) failures++;
+                    steps = null;
+                    return m;
+                }
                 tx = goal.getX(); tz = goal.getZ();
                 nodeY = goal.getBlockY();
             } else {
@@ -494,6 +503,7 @@ public final class Navigator {
         final boolean leaving = allowOutsideZone;
         final double[] av = avoid;
         final Trails tr = trails;
+        final java.util.function.DoubleBinaryOperator tc = threatCost;
         return (x, y, z) -> {
             double c = 0;
             if (inside) {
@@ -513,6 +523,7 @@ public final class Navigator {
                 if (sq(x + 0.5 - av[i]) + sq(z + 0.5 - av[i + 1]) < av[i + 2] * av[i + 2]) { c += 25; break; }
             }
             if (tr != null) c -= tr.bonus(x, y, z);
+            if (tc != null) c += tc.applyAsDouble(x + 0.5, z + 0.5);
             return c;
         };
     }
@@ -532,6 +543,7 @@ public final class Navigator {
         steps = list;
         reaches = st == PathSearch.State.FOUND;
         smart = true;
+        pathStartDist = flatTo(pos);
         // Пока считали, бот ушёл от стартовой клетки: начинаем с ближайшего узла.
         int near = 0;
         double nd = Double.MAX_VALUE;
@@ -584,6 +596,7 @@ public final class Navigator {
         steps = list;
         reaches = r.reaches;
         smart = false;
+        pathStartDist = flatTo(p.getLocation());
         idx = 0;
         // Первый узел - это клетка, где бот уже стоит.
         if (steps.size() > 1) idx = 1;
@@ -837,4 +850,13 @@ public final class Navigator {
     }
 
     private static double sq(double v) { return v * v; }
+
+    /** Расстояние по горизонтали от точки до цели. */
+    private double flatTo(Location pos) {
+        if (goal == null || !goal.getWorld().equals(pos.getWorld())) return 0;
+        return Math.sqrt(sq(goal.getX() - pos.getX()) + sq(goal.getZ() - pos.getZ()));
+    }
+
+    /** Насколько далеко была цель, когда строился текущий путь. */
+    private double pathStartDist;
 }

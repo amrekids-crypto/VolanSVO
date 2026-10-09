@@ -3,6 +3,9 @@ version: 1.0.0
 main: dev.volansvo.svo.VolanSVO
 api-version: 1.21
 authors: [Kirqum]
+# Без Multiverse-Core игровой мир не клонируется. Остальные - чтобы грузились раньше (боты и
+# хуки работают с их предметами и событиями).
+softdepend: [Multiverse-Core, ExecutableItems, MilitaryCraft, ProtocolLib, AuthMe, VolanZip]
 
 commands:
   svolobby:
