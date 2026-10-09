@@ -75,13 +75,20 @@ final class Builder {
      * а камень и прочее «на руках» не ковыряем.
      */
     static boolean canDig(Player p, Block b) {
+        return canDig(p, b, 1.6);
+    }
+
+    /** Сколько секунд готовы ломать руками (застряли в застройке - дольше обычного). */
+    double handLimit = 1.6;
+
+    static boolean canDig(Player p, Block b, double handLimit) {
         if (!breakable(b)) return false;
         if (bestTool(p, b) >= 0) return true;
         float h = b.getType().getHardness();
         boolean needTool;
         try { needTool = b.getBlockData().requiresCorrectToolForDrops(); } catch (Throwable t) { needTool = h >= 1.5f; }
         double seconds = h * (needTool ? 5.0 : 1.5);
-        return seconds <= 1.6;
+        return seconds <= handLimit;
     }
 
     /**
@@ -89,7 +96,7 @@ final class Builder {
      * слишком далеко (тогда вызывающий сначала подходит).
      */
     boolean mine(Player p, Block b, int now) {
-        if (b == null || !canDig(p, b) || isDenied(b)) { stopMining(p, "нельзя"); return false; }
+        if (b == null || !canDig(p, b, handLimit) || isDenied(b)) { stopMining(p, "нельзя"); return false; }
         Location c = b.getLocation().add(0.5, 0.5, 0.5);
         if (p.getEyeLocation().distance(c) > 4.4) { stopMining(p, "далеко"); return false; }
         if (mining == null || !mining.equals(b)) {
@@ -105,7 +112,7 @@ final class Builder {
         motor.turn(p, Motor.yawTo(c.getX() - eye.getX(), c.getZ() - eye.getZ()),
             Motor.pitchTo(c.getX() - eye.getX(), c.getY() - eye.getY(), c.getZ() - eye.getZ()), turnSpeed);
         float speed = b.getBreakSpeed(p);
-        if (speed <= 0f || now - mineStart > 20 * 12) { stopMining(p, speed <= 0f ? "скорость 0" : "12 секунд"); return false; }
+        if (speed <= 0f || now - mineStart > 20 * Math.max(12, handLimit + 4)) { stopMining(p, speed <= 0f ? "скорость 0" : "12 секунд"); return false; }
         progress += speed;
         if (now % 5 == 0) p.swingMainHand();
         if (now % 3 == 0) crack(p, b, Math.min(progress, 0.99f));
@@ -187,7 +194,7 @@ final class Builder {
     }
 
     /** Подходящий инструмент (кирка для камня, топор для дерева...) получше. */
-    private static int bestTool(Player p, Block b) {
+    static int bestTool(Player p, Block b) {
         PlayerInventory inv = p.getInventory();
         int best = -1, bestTier = -1;
         for (int i = 0; i < 36; i++) {
@@ -292,7 +299,16 @@ final class Builder {
     boolean tower(Player p, int targetFeetY, int now) {
         Location l = p.getLocation();
         int feet = l.getBlockY();
-        if (feet >= targetFeetY || blockCount(p) == 0 || placeBlocked()) { towerWhy = "end " + feet + "/" + targetFeetY + " b=" + blockCount(p) + " pb=" + placeBlocked(); towerFeetY = Integer.MIN_VALUE; return false; }
+        // В прыжке ноги выше столба: считаем по верху столба, иначе последний блок не ставится.
+        boolean onG = BotNms.onGround(p);
+        int built = onG || towerFeetY == Integer.MIN_VALUE ? feet : towerFeetY;
+        // Последний блок встал, а мы ещё в воздухе: столб готов, ждём приземления на него.
+        if (built >= targetFeetY && !onG && towerFeetY != Integer.MIN_VALUE && l.getY() > towerFeetY - 1.2) {
+            towerWhy = "landing";
+            BotNms.input(p, 0f, 0f, false);
+            return true;
+        }
+        if (built >= targetFeetY || blockCount(p) == 0 || placeBlocked()) { towerWhy = "end " + feet + "/" + targetFeetY + " b=" + blockCount(p) + " pb=" + placeBlocked(); towerFeetY = Integer.MIN_VALUE; return false; }
         if (!inZone(p.getWorld().getBlockAt(l.getBlockX(), feet, l.getBlockZ()))) { towerWhy = "за зоной"; towerFeetY = Integer.MIN_VALUE; return false; }
         // Над головой должно быть место.
         Block head = p.getWorld().getBlockAt(l.getBlockX(), feet + 2, l.getBlockZ());

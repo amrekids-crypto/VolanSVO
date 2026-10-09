@@ -167,6 +167,12 @@ public final class NmsBlockView implements BlockView {
         if (id < 0 || id >= typeByState.length) return classify(s);
         byte t = typeByState[id];
         if (t == UNKNOWN) typeByState[id] = t = classify(s);
+        // Люк над лестницей (лиана, подмостки): это проход, его открывают.
+        if (b(s) instanceof net.minecraft.world.level.block.TrapDoorBlock) {
+            BlockState under = state(x, y - 1, z);
+            if (under != null && (under.is(BlockTags.CLIMBABLE) || under.getBlock() instanceof LadderBlock
+                    || under.getBlock() instanceof ScaffoldingBlock) && inZone(x, z)) return Cell.DOOR;
+        }
         // Закрытую дверь за зоной (или запертую) не открыть: это стена.
         if ((t & Cell.KIND) == Cell.DOOR && (!inZone(x, z) || locked != null && locked.test(Pos.pack(x, y, z)))
                 && !(s.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.OPEN)
@@ -187,6 +193,8 @@ public final class NmsBlockView implements BlockView {
         LevelChunkSection sec = chunk.getSections()[chunk.getSectionIndex(y)];
         return sec.getBlockState(x & 15, y & 15, z & 15);
     }
+
+    private static Block b(BlockState s) { return s.getBlock(); }
 
     private static byte classify(BlockState s) {
         if (s.isAir()) return Cell.AIR;
@@ -228,6 +236,9 @@ public final class NmsBlockView implements BlockView {
         return 0;
     }
 
+    /** Сколько секунд бот готов ломать блок голыми руками (застрял - дольше). */
+    public double handLimit = 1.6;
+
     @Override
     public int breakTicks(int x, int y, int z) {
         if (noBreak != null && noBreak.contains(Pos.pack(x, y, z))) return -1;
@@ -251,7 +262,7 @@ public final class NmsBlockView implements BlockView {
         } else {
             // Те же пределы, что у рук бота (Builder.canDig): дольше 1.6 сек голыми руками не копаем.
             double seconds = h * (needTool ? 5.0 : 1.5);
-            if (seconds > 1.6) return -1;
+            if (seconds > handLimit) return -1;
             ticks = seconds * 20;
         }
         return Math.max(1, (int) Math.ceil(ticks));

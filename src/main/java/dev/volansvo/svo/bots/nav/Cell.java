@@ -70,8 +70,21 @@ public final class Cell {
         return floor(v.type(x, y - 1, z));
     }
 
-    /** Пройти присев: ноги в пустой клетке на полу, над ними верхняя плита (проход в полтора блока). */
+    /**
+     * Пройти присев (проход в полтора блока): ноги в пустой клетке на полу, над ними верхняя
+     * плита; или ноги на нижней плите, а потолок сразу над головой.
+     */
     public static boolean crouch(BlockView v, int x, int y, int z) {
-        return (v.type(x, y, z) & KIND) == AIR && (v.type(x, y + 1, z) & KIND) == LOW && floor(v.type(x, y - 1, z));
+        byte f = v.type(x, y, z);
+        int k = f & KIND;
+        if (k == AIR) return (v.type(x, y + 1, z) & KIND) == LOW && floor(v.type(x, y - 1, z));
+        return k == HALF && bodyFree(v.type(x, y + 1, z)) && !bodyFree(v.type(x, y + 2, z))
+            && (v.type(x, y + 2, z) & KIND) != DANGER;
+    }
+
+    /** Стоим в клетке только присев (над головой плита или потолок над нижней плитой). */
+    public static boolean lowHead(BlockView v, int x, int y, int z) {
+        if ((v.type(x, y + 1, z) & KIND) == LOW) return true;
+        return (v.type(x, y, z) & KIND) == HALF && !bodyFree(v.type(x, y + 2, z));
     }
 }

@@ -29,6 +29,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.craftbukkit.CraftServer;
 import org.bukkit.craftbukkit.CraftWorld;
+import org.bukkit.World;
 import org.bukkit.craftbukkit.entity.CraftEntity;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
 import org.bukkit.entity.Entity;
@@ -288,5 +289,11 @@ public final class BotNms {
 
     private static float clamp(float v) {
         return Math.max(-1f, Math.min(1f, v));
+    }
+
+    /** Граница мира сейчас едет: {к какому размеру, сколько миллисекунд ещё}. Не едет - {размер, 0}. */
+    public static double[] borderLerp(World w) {
+        net.minecraft.world.level.border.WorldBorder b = ((CraftWorld) w).getHandle().getWorldBorder();
+        return new double[]{b.getLerpTarget(), b.getLerpRemainingTime()};
     }
 }

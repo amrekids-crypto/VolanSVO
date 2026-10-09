@@ -2427,16 +2427,22 @@ public class GameManager {
         // Итоговый размер зоны в конце ОДИНАКОВ для обоих режимов (940+940 блоков сужения) -
         // "быстрая зона" влияет только на скорость (сколько секунд едет до той же точки),
         // а не на то, где зона в итоге останавливается.
-        double shrinkAmount = 940.0;
+        for (long[] ph : zoneSchedule()) {
+            if (currentTick != ph[0]) continue;
+            wb.setSize(wb.getSize() - ph[1], ph[2]);
+            if (ph[0] == 15000) broadcastGame(ChatColor.AQUA + "Зона начала сужаться!");
+            else broadcastGame(ChatColor.AQUA + (fastZone ? "Зона быстро сужается!" : "Зона сужается"));
+        }
+    }
+
+    /**
+     * Расписание сужений зоны: {тик обратного отсчёта, на сколько уменьшается размер, секунд едет}.
+     * Боты по нему заранее знают, когда и куда поедет зона.
+     */
+    public long[][] zoneSchedule() {
         long duration15 = fastZone ? 500L : 627L;    // рейт: on 1.88/с, off ~1.5/с (как раньше)
         long duration30 = fastZone ? 1000L : 1567L;  // рейт: on 0.94/с, off ~0.6/с (как раньше)
-        if (currentTick == 15000) {
-            wb.setSize(wb.getSize() - shrinkAmount, duration15);
-            broadcastGame(ChatColor.AQUA + "Зона начала сужаться!");
-        } else if (currentTick == 30000) {
-            wb.setSize(wb.getSize() - shrinkAmount, duration30);
-            broadcastGame(ChatColor.AQUA + (fastZone ? "Зона быстро сужается!" : "Зона сужается"));
-        }
+        return new long[][]{{30000, 940, duration30}, {15000, 940, duration15}};
     }
 
     /** Помечает игрока как получившего от НАС медленное падение (старт игры/возрождение в

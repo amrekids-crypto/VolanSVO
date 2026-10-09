@@ -71,6 +71,15 @@ public final class VolanHooks {
         return plugin.getGameManager().getCurrentTick();
     }
 
+    /** Расписание сужений зоны (см. GameManager.zoneSchedule), пусто - нет игры. */
+    public long[][] zoneSchedule() {
+        try {
+            return plugin.getGameManager().zoneSchedule();
+        } catch (Throwable t) {
+            return new long[0][];
+        }
+    }
+
     public boolean isNukeButton(ItemStack it) {
         return plugin.getGameManager().isNukeButton(it);
     }

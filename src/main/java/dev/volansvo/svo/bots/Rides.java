@@ -31,7 +31,7 @@ import java.util.function.IntPredicate;
  */
 final class Rides {
 
-    private enum Mode { NONE, ZIP_WALK, ZIP_JUMP, ZIP_RIDE, CAR_PLACE, CAR_WALK, CAR_DRIVE, CAR_RIDE }
+    private enum Mode { NONE, ZIP_WALK, ZIP_JUMP, ZIP_RIDE, CAR_PLACE, CAR_WALK, CAR_DRIVE, CAR_RIDE, TRAIN_WAIT, TRAIN_RIDE }
 
     /** Ключи PDC частей техники и предметов-установщиков MilitaryCraft (имя ключа -> тип). */
     private static final Map<String, String> PART_KEYS = new HashMap<String, String>();
@@ -95,12 +95,14 @@ final class Rides {
     /** Куда идти пешком (к тросу или к технике), или null. */
     Location walkTarget() {
         if (mode == Mode.ZIP_WALK) return zipStand;
+        if (mode == Mode.TRAIN_WAIT && trainStand != null) return trainStand;
         if (mode == Mode.CAR_WALK && carPart != null && carPart.isValid()) return carPart.getLocation();
         return null;
     }
 
     /** Навигатор не может дойти до троса или техники: бросаем эту затею. */
     void walkFailed(int now) {
+        if (mode == Mode.TRAIN_WAIT) { mode = Mode.NONE; banTrainUntil = now + 20 * 40; nextPlan = now + 40; return; }
         if (mode == Mode.ZIP_WALK) banZip(now);
         if (mode == Mode.CAR_WALK) banCarsUntil = now + 20 * 40;
         if (mode == Mode.ZIP_WALK || mode == Mode.CAR_WALK) { mode = Mode.NONE; nextPlan = now + 40; }
@@ -123,8 +125,10 @@ final class Rides {
      * danger - бой, бегство, лечение: тогда ни во что не садимся.
      */
     void plan(Player p, int now, Location travel, boolean danger) {
-        if (danger && (mode == Mode.ZIP_WALK || mode == Mode.CAR_WALK || mode == Mode.CAR_PLACE)
+        if (danger && (mode == Mode.ZIP_WALK || mode == Mode.CAR_WALK || mode == Mode.CAR_PLACE || mode == Mode.TRAIN_WAIT)
                 && !joiningAlly) { mode = Mode.NONE; return; }
+        if (travel != null && mode == Mode.TRAIN_RIDE) dest = travel.clone();
+        trackTrains(p, now);
         if (travel != null && (mode == Mode.CAR_DRIVE || mode == Mode.CAR_WALK && wantDriver)) dest = travel.clone();
         if (mode != Mode.NONE || now < nextPlan || danger || p.isInsideVehicle()) return;
         nextPlan = now + 20;
@@ -156,6 +160,9 @@ final class Rides {
 
         // 2. Зиплайн по пути.
         if (tryZipline(p, now, travel, far)) return;
+
+        // 2б. Поезд идёт в нашу сторону (и не в зону) - ждём его у рельсов впереди и садимся.
+        if (far >= 60 && now >= banTrainUntil && tryTrain(p, now, travel)) return;
 
         if (far < 80 || now < banCarsUntil) return;
         // 3. Пустая техника рядом - садимся за руль.
@@ -198,8 +205,19 @@ final class Rides {
             sneakUntil = now + 3;
             return true;
         }
+        // Сидим в поезде (сели сами или посадили).
+        if (p.isInsideVehicle() && mode != Mode.TRAIN_RIDE && trainOfSeat(p.getVehicle()) != null) {
+            mode = Mode.TRAIN_RIDE;
+            trainId = trainOfSeat(p.getVehicle());
+            since = now;
+            rideLast = p.getLocation();
+            rideLastTick = now;
+            rideStill = 0;
+            rideFar = 0;
+            log.accept(name + " едет на поезде" + (dest != null ? " к " + dest.getBlockX() + "," + dest.getBlockZ() : ""));
+        }
         // Сел в технику не через нас (или нас посадили) - ведём себя как пассажир.
-        if (p.isInsideVehicle() && mode != Mode.CAR_DRIVE && mode != Mode.CAR_RIDE) {
+        if (p.isInsideVehicle() && mode != Mode.CAR_DRIVE && mode != Mode.CAR_RIDE && mode != Mode.TRAIN_RIDE) {
             String id = seatId(p.getVehicle());
             if (id == null) return false; // лодка, вагонетка и т.п. - не наше
             carId = id;
@@ -228,9 +246,225 @@ final class Rides {
                 return carDrive(p, now, enemy);
             case CAR_RIDE:
                 return carRide(p, now, enemy);
+            case TRAIN_WAIT:
+                return trainWait(p, now);
+            case TRAIN_RIDE:
+                return trainRide(p, now);
             default:
                 return false;
         }
+    }
+
+    // =====================================================================  поезд (MilitaryCraft TrainCraft)
+
+    private static final NamespacedKey TRAIN_ID = new NamespacedKey("traincraft", "train_id");
+    private static final NamespacedKey CAR_INDEX = new NamespacedKey("traincraft", "car_index");
+    /** Где был каждый поезд в прошлый раз: id -> {x, z, тик}. Общая на всех ботов. */
+    private static final Map<String, double[]> TRAIN_SEEN = new HashMap<String, double[]>();
+    /** Скорость и направление поезда (блоков в секунду по x и z). */
+    private static final Map<String, double[]> TRAIN_VEL = new HashMap<String, double[]>();
+    private static int trainTrackTick = -100;
+
+    /** Заметки бота (видны в отладке, в консоль - только у ботов с debug). */
+    java.util.function.Consumer<String> log = m -> {};
+
+    private String trainId;
+    private Location trainStand;
+    private int banTrainUntil;
+    private Location rideLast;
+    private int rideLastTick, rideStill, rideFar;
+    private double rideBest = Double.MAX_VALUE;
+
+    /** id поезда, которому принадлежит хитбокс вагона, или null. */
+    static String trainOf(Entity e) {
+        if (!(e instanceof org.bukkit.entity.Interaction)) return null;
+        return e.getPersistentDataContainer().get(TRAIN_ID, PersistentDataType.STRING);
+    }
+
+    /** id поезда, если это сиденье поезда (стойка у хитбокса вагона), иначе null. */
+    static String trainOfSeat(Entity seat) {
+        if (!(seat instanceof org.bukkit.entity.ArmorStand)) return null;
+        for (Entity e : seat.getNearbyEntities(2.5, 3, 2.5)) {
+            String id = trainOf(e);
+            if (id != null) return id;
+        }
+        return null;
+    }
+
+    private static int carIndex(Entity e) {
+        Integer i = e.getPersistentDataContainer().get(CAR_INDEX, PersistentDataType.INTEGER);
+        return i == null ? -1 : i;
+    }
+
+    /** Раз в секунду (на всех ботов одна выборка): где поезда и куда едут. */
+    private static void trackTrains(Player p, int now) {
+        if (now - trainTrackTick < 10) return;
+        double dt = (now - trainTrackTick) / 20.0;
+        trainTrackTick = now;
+        Map<String, double[]> pos = new HashMap<String, double[]>();
+        for (Entity e : p.getWorld().getEntitiesByClass(org.bukkit.entity.Interaction.class)) {
+            String id = trainOf(e);
+            if (id == null || carIndex(e) != 0) continue;
+            pos.put(id, new double[]{e.getLocation().getX(), e.getLocation().getZ()});
+        }
+        for (Map.Entry<String, double[]> en : pos.entrySet()) {
+            double[] was = TRAIN_SEEN.get(en.getKey()), now2 = en.getValue();
+            if (was != null && dt > 0 && dt < 3) {
+                TRAIN_VEL.put(en.getKey(), new double[]{(now2[0] - was[0]) / dt, (now2[1] - was[1]) / dt});
+            }
+        }
+        TRAIN_SEEN.clear();
+        TRAIN_SEEN.putAll(pos);
+        TRAIN_VEL.keySet().retainAll(pos.keySet());
+    }
+
+    /** Насколько точка далеко от края зоны (меньше нуля - за краем). */
+    private static double edgeAt(World w, double x, double z) {
+        org.bukkit.WorldBorder wb = w.getWorldBorder();
+        return wb.getSize() / 2.0 - Math.max(Math.abs(x - wb.getCenter().getX()), Math.abs(z - wb.getCenter().getZ()));
+    }
+
+    /**
+     * Поезд рядом едет туда же, куда нам, и не к краю зоны: выбираем рельс впереди него, куда
+     * успеваем дойти раньше поезда, и встаём сбоку от путей (на рельсах поезд сбивает).
+     */
+    private boolean tryTrain(Player p, int now, Location travel) {
+        Location me = p.getLocation();
+        World w = p.getWorld();
+        for (Entity e : p.getNearbyEntities(64, 20, 64)) {
+            String id = trainOf(e);
+            if (id == null || carIndex(e) != 0) continue;
+            double[] v = TRAIN_VEL.get(id);
+            if (v == null) continue;
+            double speed = Math.hypot(v[0], v[1]);
+            if (speed < 3) continue;
+            double dx = v[0] / speed, dz = v[1] / speed;
+            Location loco = e.getLocation();
+            double tx = travel.getX() - loco.getX(), tz = travel.getZ() - loco.getZ(), tl = Math.hypot(tx, tz);
+            if (tl < 1 || (dx * tx + dz * tz) / tl < 0.6) continue;      // едет не в нашу сторону
+            if (edgeAt(w, loco.getX() + dx * 40, loco.getZ() + dz * 40) < 20) continue; // везёт к зоне
+            // Рельс впереди поезда, до которого мы дойдём раньше него (с запасом).
+            for (int ahead = 12; ahead <= 64; ahead += 2) {
+                double ax = loco.getX() + dx * ahead, az = loco.getZ() + dz * ahead;
+                Block rail = findRail(w, ax, loco.getY(), az);
+                if (rail == null) continue;
+                Location stand = sideOf(w, rail, dx, dz);
+                if (stand == null) continue;
+                double walk = flat(me, stand) / 4.3 + 1.5, train = ahead / speed;
+                if (walk >= train) continue;
+                trainId = id;
+                trainStand = stand;
+                mode = Mode.TRAIN_WAIT;
+                since = now;
+                dest = travel.clone();
+                log.accept(name + " ждёт поезд у " + stand.getBlockX() + "," + stand.getBlockY() + "," + stand.getBlockZ());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Block findRail(World w, double x, double y, double z) {
+        int bx = (int) Math.floor(x), by = (int) Math.floor(y), bz = (int) Math.floor(z);
+        for (int r = 0; r <= 1; r++) {
+            for (int ox = -r; ox <= r; ox++) {
+                for (int oz = -r; oz <= r; oz++) {
+                    for (int oy = -2; oy <= 2; oy++) {
+                        Block b = w.getBlockAt(bx + ox, by + oy, bz + oz);
+                        if (org.bukkit.Tag.RAILS.isTagged(b.getType())) return b;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Клетка в двух блоках сбоку от рельса, где можно стоять (на путях поезд сбивает). */
+    private static Location sideOf(World w, Block rail, double dx, double dz) {
+        double sx = -dz, sz = dx;
+        for (int sign = 1; sign >= -1; sign -= 2) {
+            int x = (int) Math.floor(rail.getX() + 0.5 + sx * sign * 2), z = (int) Math.floor(rail.getZ() + 0.5 + sz * sign * 2);
+            for (int oy = 1; oy >= -1; oy--) {
+                int y = rail.getY() + oy;
+                Block feet = w.getBlockAt(x, y, z), head = feet.getRelative(org.bukkit.block.BlockFace.UP), under = feet.getRelative(org.bukkit.block.BlockFace.DOWN);
+                if (!feet.isPassable() || !head.isPassable() || !under.getType().isSolid()) continue;
+                if (org.bukkit.Tag.RAILS.isTagged(feet.getType()) || feet.isLiquid()) continue;
+                return new Location(w, x + 0.5, y, z + 0.5);
+            }
+        }
+        return null;
+    }
+
+    /** Стоим у путей: поезд подъезжает - ПКМ по ближайшему вагону. */
+    private boolean trainWait(Player p, int now) {
+        if (trainId == null || now - since > 20 * 30) { endTrain(now, 20 * 40, "не дождался поезда"); return false; }
+        Location me = p.getLocation();
+        if (flat(me, trainStand) > 0.9) return false; // ещё идём
+        motor.stop(p);
+        BotNms.sneak(p, false);
+        Entity best = null;
+        double bd = 1e9;
+        boolean ahead = false;
+        double[] v = TRAIN_VEL.get(trainId);
+        for (Entity e : p.getNearbyEntities(24, 8, 24)) {
+            if (!trainId.equals(trainOf(e))) continue;
+            Location el = e.getLocation();
+            double d = flat(me, el);
+            if (v != null && ((el.getX() - me.getX()) * -v[0] + (el.getZ() - me.getZ()) * -v[1]) > 0) ahead = true; // ещё не доехал
+            if (d < bd) { bd = d; best = e; }
+        }
+        if (best == null) { endTrain(now, 20 * 40, "поезд пропал"); return false; }
+        Location bl = best.getLocation();
+        motor.turn(p, Motor.yawTo(bl.getX() - me.getX(), bl.getZ() - me.getZ()), 10f, 40f);
+        // Хитбокс вагона широкий (3.4): с двух блоков от оси до него рукой подать.
+        if (bd < 3.6) BotNms.interact(p, best);
+        if (p.isInsideVehicle()) return true;
+        if (!ahead && bd > 8 && now - since > 40) { endTrain(now, 20 * 40, "поезд проехал"); return false; }
+        return true;
+    }
+
+    /**
+     * Едем. Сходим (шифт), когда поезд везёт к краю зоны, встал, или мы проехали нужное место.
+     */
+    private boolean trainRide(Player p, int now) {
+        if (!p.isInsideVehicle()) { mode = Mode.NONE; nextPlan = now + 40; return false; }
+        if (now - rideLastTick < 10) return true;
+        Location me = p.getLocation();
+        World w = p.getWorld();
+        double dt = (now - rideLastTick) / 20.0;
+        double vx = (me.getX() - rideLast.getX()) / dt, vz = (me.getZ() - rideLast.getZ()) / dt;
+        rideLast = me;
+        rideLastTick = now;
+        double sp = Math.hypot(vx, vz);
+        rideStill = sp < 0.5 ? rideStill + 1 : 0;
+        String why = null;
+        double edge = edgeAt(w, me.getX(), me.getZ()), soon = edgeAt(w, me.getX() + vx * 4, me.getZ() + vz * 4);
+        if (soon < 8 || edge < 40 && soon < edge - 2.5 && soon < 30) why = "поезд везёт в зону (до края " + (int) edge + ")";
+        else if (rideStill >= 4) why = "поезд встал";
+        else if (dest != null && dest.getWorld().equals(w)) {
+            double d = flat(me, dest);
+            if (d < 20) why = "приехал";
+            else {
+                if (d < rideBest - 0.5) { rideBest = d; rideFar = 0; }
+                else if (++rideFar >= 3 && d < 80) why = "проехал нужное место";
+            }
+        }
+        if (why == null && p.getHealth() < 8 && p.getNoDamageTicks() > 0) why = "в поезде подстрелили";
+        if (why != null) {
+            log.accept(name + " сходит с поезда: " + why);
+            dismount(p);
+            endTrain(now, 20 * 30, null);
+        }
+        return true;
+    }
+
+    private void endTrain(int now, int ban, String why) {
+        if (why != null) log.accept(name + " " + why);
+        mode = Mode.NONE;
+        trainStand = null;
+        rideBest = Double.MAX_VALUE;
+        banTrainUntil = now + ban;
+        nextPlan = now + 40;
     }
 
     // =====================================================================  зиплайн
@@ -274,7 +508,7 @@ final class Rides {
         zipBest = 1e9;
         mode = Mode.ZIP_WALK;
         since = now;
-        if (mgr.skill().debug) mgr.debug(name + " идёт к зиплайну " + zipKey);
+        if (mgr.skill().debug) log.accept(name + " идёт к зиплайну " + zipKey);
         return true;
     }
 
@@ -407,7 +641,7 @@ final class Rides {
             Entity part = choosePart(p, id, kind, true);
             if (part == null) continue;
             startCarWalk(part, false, true, o.getUniqueId(), null, now);
-            if (mgr.skill().debug) mgr.debug(name + " садится в " + kind + " к " + o.getName());
+            if (mgr.skill().debug) log.accept(name + " садится в " + kind + " к " + o.getName());
             return true;
         }
         return false;
@@ -526,7 +760,7 @@ final class Rides {
         BotNms.look(p, Motor.yawTo(cx - eye.getX(), cz - eye.getZ()), Motor.pitchTo(cx - eye.getX(), cy - eye.getY(), cz - eye.getZ()));
         motor.sync(p);
         BotNms.useItemOn(p, spot.getX(), spot.getY(), spot.getZ(), 1);
-        if (mgr.skill().debug) mgr.debug(name + " ставит технику у " + spot.getX() + "," + spot.getY() + "," + spot.getZ());
+        if (mgr.skill().debug) log.accept(name + " ставит технику у " + spot.getX() + "," + spot.getY() + "," + spot.getZ());
         return true;
     }
 

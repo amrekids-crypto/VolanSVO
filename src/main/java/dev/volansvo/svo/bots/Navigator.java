@@ -138,6 +138,10 @@ public final class Navigator {
     public boolean allowOutsideZone;
     /** Финал: к центру любой ценой, путь смелее ломает и ставит блоки. */
     public boolean eager;
+    /** Застряли в застройке: путь ломает и то, что руками ломать долго (доски, терракота, камень). */
+    public boolean desperate;
+    /** Зона едет: на сколько блоков от края она продвинется, пока мы идём (клетки там дороже). */
+    public double zoneMargin;
     /** Открыть дверь или калитку на пути (руками бота, ПКМ). */
     java.util.function.Predicate<Block> opener;
     private int unstuckTicks = 0;
@@ -310,6 +314,11 @@ public final class Navigator {
                 nodeY = goal.getBlockY();
             } else {
                 s = steps.get(idx);
+                // Бота перенесло (телепорт, смерть, отбросило): старый путь отсюда не ведёт.
+                if (sq(s.x + 0.5 - pos.getX()) + sq(s.z + 0.5 - pos.getZ()) > 7 * 7 || Math.abs(s.y - pos.getY()) > 24) {
+                    steps = null;
+                    return m;
+                }
                 if (smart) {
                     // Мир изменился (взрыв, чужая стройка): клетка пути больше не годится.
                     if (!s.works() && s.move != PathStep.PARKOUR && !Cell.stand(live, s.x, s.y, s.z)
@@ -385,6 +394,13 @@ public final class Navigator {
                 if (c.move == PathStep.CROUCH && sq(c.x + 0.5 - pos.getX()) + sq(c.z + 0.5 - pos.getZ()) < 2.2 * 2.2) m.crouch = true;
             }
             if (m.crouch) m.jump = false;
+            // Вниз по подмосткам спускаются присев.
+            if (s != null && s.move == PathStep.CLIMB && s.y < pos.getY() - 0.3
+                    && (pos.getBlock().getType() == org.bukkit.Material.SCAFFOLDING
+                        || pos.clone().add(0, -0.2, 0).getBlock().getType() == org.bukkit.Material.SCAFFOLDING)) {
+                m.crouch = true;
+                m.jump = false;
+            }
         }
         boolean drop = s != null && s.move == PathStep.DESCEND && pos.getY() - s.y > 1.5;
         m.sprintOk = !inWater && !drop && (run || isStraight());
@@ -444,6 +460,8 @@ public final class Navigator {
         World w = pos.getWorld();
         NmsBlockView view = new NmsBlockView(w, true, tools(p), noBreak);
         view.locked = Bot::isLocked;
+        if (desperate) view.handLimit = 12;
+        else if (eager) view.handLimit = 6;
         int sx = pos.getBlockX(), sy = (int) Math.floor(pos.getY() + 0.2), sz = pos.getBlockZ();
         // В воздухе ищем от клетки, куда приземлимся.
         if (!onGround && !inWater) {
@@ -452,10 +470,14 @@ public final class Navigator {
             if (Cell.stand(view, sx, y, sz)) sy = y;
         }
         PathSearch.Options o = new PathSearch.Options();
-        o.dig = (modify || eager) && skill.navDig;
-        o.blocks = (modify || eager) && skill.navPlace && tick >= noPlaceUntil && !placeBlocked.getAsBoolean()
-            ? Math.min(eager ? 24 : 10, Math.max(0, Builder.blockCount(p) - (eager ? 2 : 4))) : 0;
+        o.dig = (modify || eager || desperate) && skill.navDig;
+        if (desperate) o.maxNodes = 6000;
+        o.blocks = (modify || eager || desperate) && skill.navPlace && tick >= noPlaceUntil && !placeBlocked.getAsBoolean()
+            ? Math.min(eager ? 24 : 16, Math.max(0, Builder.blockCount(p) - 2)) : 0;
         o.parkourGap = skill.navParkour && tick >= noParkourUntil ? (modify ? 2 : 1) : 0;
+        // Цель заметно выше, а блоки есть: столб в оценке почти не виден (подъём по ступенькам
+        // дешевле), и поиск успевает выдохнуться на обходах. Даём ему больше узлов и смелее к цели.
+        if (goal.getBlockY() - sy >= 3 && o.blocks >= 2) { o.maxNodes = Math.max(o.maxNodes, 7000); o.weight = 1.3; }
         search = new PathSearch(view, field(w, pos), new NavGoal.Near(goal.getBlockX(), goal.getBlockY(), goal.getBlockZ(), accuracy),
             o, sx, sy, sz);
         searchStart = tick;
@@ -468,6 +490,8 @@ public final class Navigator {
         final double cx = wb.getCenter().getX(), cz = wb.getCenter().getZ(), half = wb.getSize() / 2.0;
         // Уходим от зоны - путь через её край можно.
         final boolean inside = wb.isInside(pos) && !allowOutsideZone;
+        final double margin = zoneMargin;
+        final boolean leaving = allowOutsideZone;
         final double[] av = avoid;
         final Trails tr = trails;
         return (x, y, z) -> {
@@ -478,6 +502,12 @@ public final class Navigator {
                 if (edge < -4) return CostField.BLOCKED;
                 if (edge < 0.5) c += 12;
                 else if (edge < 4) c += (4 - edge) * 3;
+            }
+            // Зона едет: клетки, которые она скоро накроет, дороже; уходя от неё - тем более,
+            // чтобы путь не вёл вдоль края или наружу к удобному спуску.
+            if (margin > 0) {
+                double e = half - Math.max(Math.abs(x + 0.5 - cx), Math.abs(z + 0.5 - cz));
+                if (e < margin) c += (margin - Math.max(e, -12)) * (leaving ? 3 : 1.5);
             }
             for (int i = 0; i + 2 < av.length; i += 3) {
                 if (sq(x + 0.5 - av[i]) + sq(z + 0.5 - av[i + 1]) < av[i + 2] * av[i + 2]) { c += 25; break; }
@@ -789,7 +819,9 @@ public final class Navigator {
             if (!(data instanceof Openable) || !Builder.inZone(b)) continue; // за зоной не открыть
             String type = b.getType().name();
             if (type.startsWith("IRON_")) continue; // железные руками не открыть
-            if (!type.endsWith("_DOOR") && !type.endsWith("_FENCE_GATE") && !(dy == 1 && type.endsWith("_TRAPDOOR"))) continue;
+            // Люк: над головой или (на лестнице) под ногами, в нём проход.
+            boolean hatch = type.endsWith("_TRAPDOOR") && (dy == 1 || s.move == PathStep.CLIMB || s.move == PathStep.DESCEND);
+            if (!type.endsWith("_DOOR") && !type.endsWith("_FENCE_GATE") && !hatch) continue;
             Openable o = (Openable) data;
             if (o.isOpen()) continue;
             if (opener != null) opener.test(b);

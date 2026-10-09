@@ -118,9 +118,14 @@ public final class PathSearch {
             }
             if (cur.h < best.h) best = cur;
             // Цель дальше области поиска: первый узел на её краю уже лежит на хорошей дороге.
+            // Но только если он ближе к цели, чем старт: иначе это край в обратную сторону
+            // (впереди обрыв или вода), и бот развернулся бы назад.
             if (Math.abs(cur.x - start.x) >= opt.radius - 1 || Math.abs(cur.z - start.z) >= opt.radius - 1) {
-                end = cur;
-                return state = State.PARTIAL;
+                if (cur.h < start.h - LAND * 4) {
+                    end = cur;
+                    return state = State.PARTIAL;
+                }
+                continue;
             }
             if (expanded >= opt.maxNodes) break;
             expand(cur);
@@ -155,7 +160,7 @@ public final class PathSearch {
         byte feet = t(x, y, z);
         int fk = feet & Cell.KIND;
         // Над головой верхняя плита: стоим присев, отсюда только шаг в сторону или вниз.
-        boolean low = (t(x, y + 1, z) & Cell.KIND) == Cell.LOW;
+        boolean low = Cell.lowHead(view, x, y, z);
         boolean headroom = !low && Cell.bodyFree(t(x, y + 2, z));
         // Под ногами опора: настоящая или только что поставленный блок.
         boolean firm = Cell.floor(t(x, y - 1, z)) || n.move == PathStep.PILLAR || n.move == PathStep.BRIDGE;
@@ -174,7 +179,8 @@ public final class PathSearch {
 
         byte up = t(x, y + 1, z), down = t(x, y - 1, z);
         if (fk == Cell.CLIMB) {
-            if ((up & Cell.KIND) == Cell.CLIMB && headroom) relax(n, x, y + 1, z, LADDER_UP, PathStep.CLIMB, null, Pos.NONE);
+            // Вверх по лестнице, и в люк над ней (откроем).
+            if (((up & Cell.KIND) == Cell.CLIMB || (up & Cell.KIND) == Cell.DOOR) && headroom) relax(n, x, y + 1, z, LADDER_UP, PathStep.CLIMB, null, Pos.NONE);
             if ((down & Cell.KIND) == Cell.CLIMB || stand(x, y - 1, z)) relax(n, x, y - 1, z, LADDER_DOWN, PathStep.CLIMB, null, Pos.NONE);
         } else if ((down & Cell.KIND) == Cell.CLIMB) {
             relax(n, x, y - 1, z, LADDER_DOWN, PathStep.CLIMB, null, Pos.NONE);
