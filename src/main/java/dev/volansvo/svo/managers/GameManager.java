@@ -251,17 +251,30 @@ public class GameManager {
 
     /** Отправляет кликабельную кнопку "Наблюдать" не-участнику во время идущей игры. */
     public void sendSpectateOffer(Player p) {
+        // Старт уже идёт и игрок в нём участвует (карта ещё готовится): наблюдать тут нечего,
+        // а кнопка «Наблюдать» после старта превращалась в сдачу.
+        if (state == GameState.STARTING && (isInQueue(p) || players.containsKey(p.getUniqueId()))) {
+            p.sendMessage(ChatColor.YELLOW + "Карта готовится, игра сейчас начнётся. Подожди немного.");
+            return;
+        }
         dev.volansvo.svo.maps.MapData map = plugin.getMapManager().getActiveMap();
         String mapName = map != null ? map.getDisplayName() : "СВО";
         int sec = Math.max(0, currentTick / 20);
         String time = String.format("%02d:%02d", sec / 60, sec % 60);
+        if (state == GameState.STARTING) {
+            p.sendMessage(ChatColor.RED + "Игра запускается на карте " + ChatColor.WHITE + mapName
+                + ChatColor.RED + ". Наблюдать можно будет после старта.");
+            return;
+        }
+        boolean inGameLive = isPlayerInGame(p.getUniqueId());
+        if (inGameLive) {
+            // Живому участнику кнопку не даём: случайный клик по ней раньше сразу сдавал игру.
+            p.sendMessage(ChatColor.GRAY + "Ты в игре. Сдаться и наблюдать: " + ChatColor.WHITE + "/svowatch");
+            return;
+        }
         p.sendMessage(ChatColor.RED + "Игра уже идёт на карте " + ChatColor.WHITE + mapName
             + ChatColor.RED + ". Осталось времени: " + ChatColor.YELLOW + time);
-        boolean inGameLive = isPlayerInGame(p.getUniqueId());
-        String hover = inGameLive ? "Сдаться и наблюдать" : "Нажми чтобы наблюдать за игрой";
-        if (inGameLive) {
-            p.sendMessage(ChatColor.GRAY + "Ты в игре. Наблюдение = сдача.");
-        }
+        String hover = "Нажми чтобы наблюдать за игрой";
         String tellraw = "tellraw " + p.getName()
             + " {\"text\":\"[ Наблюдать ]\",\"color\":\"aqua\",\"bold\":true"
             + ",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/svowatch\"}"
@@ -284,6 +297,9 @@ public class GameManager {
         }
     }
 
+    /** Когда живой участник нажал «наблюдать»: сдача только повторным нажатием за 15 сек. */
+    private final Map<UUID, Long> surrenderAsk = new HashMap<UUID, Long>();
+
     /** Переводит не-участника в режим наблюдателя в игровом мире. */
     public boolean startSpectating(Player p) {
         return startSpectating(p, null);
@@ -299,8 +315,26 @@ public class GameManager {
             p.sendMessage(ChatColor.RED + "Сейчас нет игры.");
             return false;
         }
-        // Живой участник, выбравший наблюдение - это сдача (выбывает из игры).
+        if (state == GameState.STARTING) {
+            p.sendMessage(ChatColor.YELLOW + "Игра ещё запускается. Наблюдать можно будет после старта.");
+            return false;
+        }
+        // Живой участник, выбравший наблюдение - это сдача (выбывает из игры). Только с
+        // подтверждением: старые кнопки «Наблюдать» в чате раньше сдавали игрока сразу после старта.
         if (isPlayerInGame(p.getUniqueId())) {
+            Long asked = surrenderAsk.get(p.getUniqueId());
+            long nowMs = System.currentTimeMillis();
+            if (!"сдаться".equalsIgnoreCase(targetName) || asked == null || nowMs - asked > 15000L) {
+                surrenderAsk.put(p.getUniqueId(), nowMs);
+                p.sendMessage(ChatColor.RED + "Ты ещё в игре. Наблюдение = сдача, ты выбываешь из матча.");
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "tellraw " + p.getName()
+                    + " {\"text\":\"[ Да, сдаться ]\",\"color\":\"red\",\"bold\":true"
+                    + ",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/svowatch сдаться\"}"
+                    + ",\"hoverEvent\":{\"action\":\"show_text\",\"contents\":\"Выбыть из игры и наблюдать (15 сек)\"}}");
+                return false;
+            }
+            surrenderAsk.remove(p.getUniqueId());
+            targetName = null;
             p.sendMessage(ChatColor.RED + "Ты сдался и теперь наблюдаешь.");
             forceEliminate(p.getUniqueId());
         }

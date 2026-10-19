@@ -6626,7 +6626,7 @@ public final class Bot {
         nav.clear();
         motor.stop(p);
         note(name + " запускает " + (useFpv ? "FPV" : "Bombsender") + " на " + tgt.getName());
-        pilot.launch(p, useFpv, tgt, now);
+        pilot.launch(p, useFpv, tgt, now, skill);
         talk(p, BotChatter.Topic.PILOT, 0.3, 20 * 120, null);
     }
 

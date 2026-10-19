@@ -38,6 +38,21 @@ final class DronePilot {
     private double leadK = 1.0;
     private double wobble;
 
+    // ---- FPV как у человека с мышью
+    /** Скорость дрона (блоков за тик): разгоняется и поворачивает не мгновенно, на виражах заносит. */
+    private Vector vel = new Vector();
+    /** Где пилот видел цель: камера дрона не видит сквозь блоки, картинка запаздывает. */
+    private final java.util.ArrayDeque<Location> seen = new java.util.ArrayDeque<Location>();
+    private int lag;
+    /** Личный промах этого вылета: пилот целится чуть мимо и плавно водит прицел. */
+    private Vector aimOff = new Vector();
+    private double aimErr;
+    /** Тик, когда пилот отпустит спринт (реакция на «пора»), и прошлое расстояние до точки. */
+    private int releaseAt = -1;
+    private double prevD = Double.MAX_VALUE;
+    /** Этот заход пилот проспит и пролетит мимо (потом развернётся). */
+    private boolean missPass;
+
     DronePilot(VolanHooks hooks, UUID self) {
         this.hooks = hooks;
         this.self = self;
@@ -46,7 +61,7 @@ final class DronePilot {
     boolean active() { return mode != Mode.NONE; }
 
     /** Предмет уже в руке: нажимаем спринт (FPV) или присед (Bombsender). */
-    void launch(Player p, boolean fpv, Player tgt, int now) {
+    void launch(Player p, boolean fpv, Player tgt, int now, BotSkill skill) {
         target = tgt;
         prevTarget = null;
         since = now;
@@ -54,6 +69,17 @@ final class DronePilot {
         java.util.concurrent.ThreadLocalRandom r = java.util.concurrent.ThreadLocalRandom.current();
         leadK = 0.3 + r.nextDouble() * 0.9;
         wobble = r.nextDouble() * 6.28;
+        vel = new Vector();
+        seen.clear();
+        // Картинка с дрона и рука пилота: 0.4-0.9 сек от того, где цель на самом деле.
+        lag = (int) Math.round(Math.max(6, Math.min(18, skill.reactionTicks * 1.2 * skill.tempo + r.nextInt(6))));
+        // Промах по-человечески: обычно 1-3 блока, у метких меньше, у косых больше.
+        aimErr = Math.max(0.5, Math.min(4.0, (0.8 + r.nextDouble() * 2.0) * skill.aimError / 2.0));
+        double a = r.nextDouble() * Math.PI * 2;
+        aimOff = new Vector(Math.cos(a) * aimErr, r.nextDouble() * 1.2 - 0.4, Math.sin(a) * aimErr);
+        releaseAt = -1;
+        prevD = Double.MAX_VALUE;
+        missPass = r.nextDouble() < 0.3;
         if (fpv) {
             BotNms.input(p, 0f, 0f, false);
             BotNms.sneak(p, false);
@@ -107,23 +133,51 @@ final class DronePilot {
 
     private void flyFpv(Player p, int now) {
         Location pos = p.getLocation();
-        if (!validTarget(target, pos)) target = nearestSeen(p, 160);
+        if (!validTarget(target, pos)) { target = nearestSeen(p, 160); seen.clear(); prevTarget = null; }
         if (target == null || now - since > 20 * 38) { BotNms.sprint(p, false); return; }
-        Location dest = target.getLocation().add(lead(target).multiply(6 * leadK)).add(0, 1.0, 0);
+        if (releaseAt >= 0 && now >= releaseAt) { BotNms.sprint(p, false); return; } // отпустил спринт - взрыв
+        // Камера дрона: цель видна, только если между ними нет блоков (вблизи ещё и слышно).
+        Location real = target.getLocation();
+        double realD = real.distance(pos);
+        if (realD < 5 || p.hasLineOfSight(target)) {
+            seen.addLast(real.clone().add(lead(target).multiply(6 * leadK)));
+            prevTarget = real;
+        }
+        while (seen.size() > lag + 1) seen.removeFirst();
+        if (seen.isEmpty()) { BotNms.sprint(p, false); return; } // так и не увидел - дрон в никуда
+        // Пилот реагирует на картинку lag тиков назад, целится со своим промахом.
+        Location dest = seen.peekFirst().clone().add(0, 1.0, 0).add(aimOff);
+        double t = (now - since) / 10.0 + wobble;
+        aimOff.add(new Vector(Math.sin(t) * 0.05, 0, Math.cos(t * 0.7) * 0.05));
+        if (aimOff.length() > aimErr * 1.3) aimOff.multiply(aimErr * 1.3 / aimOff.length());
         Vector to = dest.toVector().subtract(pos.toVector());
         double d = to.length();
         // Издалека дрон идёт не по струне: пилота водит из стороны в сторону.
         if (d > 8) to.rotateAroundY(Math.sin((now - since) / 9.0 + wobble) * 0.22);
-        if (d <= 1.7) {
-            // Не взрываемся рядом со своими.
-            if (!teammateNear(dest, 5)) { BotNms.sprint(p, false); return; }
+
+        // Подрыв: долетел до точки или проскочил её (расстояние начало расти). Палец отпускает
+        // спринт с опозданием, дрон в это время летит дальше по инерции.
+        if (releaseAt < 0 && !teammateNear(pos, 5)) {
+            boolean close = d <= 1.7;
+            boolean passing = d < 4.0 && d > prevD + 0.05;
+            if ((close || passing) && missPass) {
+                missPass = false; // этот заход проспал, развернётся и зайдёт снова
+            } else if (close || passing) {
+                releaseAt = now + 2 + java.util.concurrent.ThreadLocalRandom.current().nextInt(5);
+            }
         }
-        double step = Math.min(d, 0.75);
-        Vector mv = d > 1e-3 ? to.clone().multiply(step / d) : new Vector();
-        float yaw = Motor.yawTo(to.getX(), to.getZ());
-        float pitch = Motor.pitchTo(to.getX(), to.getY(), to.getZ());
-        BotNms.moveTo(p, pos.getX() + mv.getX(), pos.getY() + mv.getY(), pos.getZ() + mv.getZ(), yaw, pitch);
-        prevTarget = target.getLocation();
+        prevD = d;
+
+        // Инерция: желаемая скорость к точке, но разгон и поворот ограничены - на вираже заносит.
+        double speed = Math.min(0.75, Math.max(0.25, d * 0.25));
+        Vector want = d > 1e-3 ? to.clone().multiply(speed / d) : new Vector();
+        Vector dv = want.subtract(vel);
+        double acc = 0.085;
+        if (dv.length() > acc) dv.multiply(acc / dv.length());
+        vel.add(dv);
+        float yaw = Motor.yawTo(vel.getX(), vel.getZ());
+        float pitch = Motor.pitchTo(vel.getX(), vel.getY(), vel.getZ());
+        BotNms.moveTo(p, pos.getX() + vel.getX(), pos.getY() + vel.getY(), pos.getZ() + vel.getZ(), yaw, pitch);
     }
 
     private void flyBomber(Player p, int now) {
