@@ -144,6 +144,47 @@ final class Crafting {
         return true;
     }
 
+    /** Из чего бот делает меч: от лучшего к худшему (доски - отдельно, любой породы). */
+    private static final Material[][] SWORDS = {
+        {Material.DIAMOND, Material.DIAMOND_SWORD},
+        {Material.IRON_INGOT, Material.IRON_SWORD},
+        {Material.COBBLESTONE, Material.STONE_SWORD},
+        {Material.COBBLED_DEEPSLATE, Material.STONE_SWORD},
+        {Material.BLACKSTONE, Material.STONE_SWORD},
+    };
+
+    /** Материал на клинок лучшего меча, чем есть (урон в секунду больше have), или null. */
+    static Material betterSword(World w, PlayerInventory inv, double have) {
+        int sticks = count(inv, Material.STICK);
+        Material pl = planksWithAtLeast(inv, 1);
+        int planks = pl == null ? 0 : count(inv, pl);
+        for (Material[] s : SWORDS) {
+            if (count(inv, s[0]) < 2 || sticks < 1 && planks < 2) continue;
+            if (Items.meleeDps(new ItemStack(s[1])) > have + 0.5) return s[0];
+            return null; // лучший доступный не лучше нашего - остальные тем более
+        }
+        if (pl != null && planks >= (sticks > 0 ? 2 : 4) && Items.meleeDps(new ItemStack(Material.WOODEN_SWORD)) > have + 0.5) return pl;
+        return null;
+    }
+
+    /** Меч у верстака: два материала и палка (нет палки - из двух досок). Возвращает меч или null. */
+    static ItemStack sword(World w, PlayerInventory inv, double have) {
+        Material head = betterSword(w, inv, have);
+        if (head == null) return null;
+        if (count(inv, Material.STICK) < 1 && !sticks(w, inv)) return null;
+        if (count(inv, head) < 2) return null; // доски ушли на палки
+        ItemStack[] g = new ItemStack[9];
+        g[1] = new ItemStack(head);
+        g[4] = new ItemStack(head);
+        g[7] = new ItemStack(Material.STICK);
+        ItemStack res = result(w, g);
+        if (res == null || !res.getType().name().endsWith("_SWORD") || !fits(inv, res)) return null;
+        take(inv, head, 2);
+        take(inv, Material.STICK, 1);
+        give(inv, res);
+        return res;
+    }
+
     /** Семь палок в лестницы (только у верстака - это проверяет бот). */
     static boolean ladders(World w, PlayerInventory inv) {
         if (count(inv, Material.STICK) < 7) return false;

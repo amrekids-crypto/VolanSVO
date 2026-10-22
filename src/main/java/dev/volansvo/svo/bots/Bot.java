@@ -3607,7 +3607,8 @@ public final class Bot {
             if (bans.banned("platform", now)) platformChecks = 0;
             else if (BotNms.onGround(p)) platformChecks = onFloatingFloor(p) ? platformChecks + 1 : 0;
         }
-        boolean platform = platformChecks >= 6;
+        // С медленным падением (высадка) спрыгнуть безопасно - не ждём, сразу к краю.
+        boolean platform = platformChecks >= 6 || platformChecks >= 1 && p.hasPotionEffect(PotionEffectType.SLOW_FALLING);
         // Спуск (лестница в доме тоже крутится на пятачке) ловушкой не считаем.
         if (trapAnchor == null || !trapAnchor.getWorld().equals(l.getWorld()) || trapAnchor.distanceSquared(l) > 14 * 14
                 || l.getY() < trapAnchor.getY() - 2.5) {
@@ -4116,6 +4117,7 @@ public final class Bot {
 
         // Предметы ExecutableItems (ракетница, снайперка, огнемёт...): если что-то
         // подходит к этой дистанции - применяем, этот тик на это и уходит.
+        eikit.wet = visible && wetShot(p, e, now);
         if (reactionLeft <= 0 && eikit.combat(p, now, e, d, visible, t.velocity)) { motor.stop(p); return; }
 
         // Есть свой танк, а враг не вплотную: ставим его и воюем из него.
@@ -4482,7 +4484,13 @@ public final class Bot {
             auto = findEi(p, Items.Custom.AUTO, now, false);
             shotgun = findEi(p, Items.Custom.SHOTGUN, now, false);
         }
+        // Пуля в воде вязнет: из воды и в воду из калаша и пулемёта не стреляем.
+        boolean wet = target != null && target.entity != null && wetShot(p, target.entity, now);
+        if (wet) { gun = false; auto = -1; }
         if (shotgun >= 0 && d <= 8) return Weapon.SHOTGUN;
+        // Ближний бой охотнее: с мечом (не хуже деревянного) и врагом в паре шагов рубимся, хоть
+        // ствол и есть. Дальше - по настроению; стрелять всё равно любим больше.
+        if (meleeSlot >= 0 && melee >= 8 && (wet ? d <= 12 : d <= 2.6 || d <= 5.0 && meleeMood(now))) return Weapon.MELEE;
         if (auto >= 0 && d <= 3.2 && melee >= 9 && !gun) return Weapon.MELEE;
         boolean thr = find(p, Items.Kind.THROW_DAMAGE) >= 0 && now >= nextThrow;
         int custom = findLearnedCustom(p, now);
@@ -4508,6 +4516,45 @@ public final class Bot {
         if ((bow || xbow) && d > 6) return bow ? Weapon.BOW : Weapon.CROSSBOW;
         if (launcher) return Weapon.LAUNCHER;
         return Weapon.MELEE;
+    }
+
+    private int wetCheckAt = -100;
+    private boolean wetCached;
+
+    /** Выстрел уйдёт в воду: мы в воде, цель в воде или вода по линии огня. Раз в 5 тиков. */
+    private boolean wetShot(Player p, LivingEntity e, int now) {
+        if (now - wetCheckAt < 5 && now >= wetCheckAt) return wetCached;
+        wetCheckAt = now;
+        wetCached = false;
+        Location eye = p.getEyeLocation();
+        if (!e.getWorld().equals(eye.getWorld())) return false;
+        if (eye.getBlock().isLiquid() || e.getEyeLocation().getBlock().isLiquid()
+                || e.getLocation().add(0, 0.6, 0).getBlock().isLiquid()) return wetCached = true;
+        Vector to = e.getLocation().add(0, e.getHeight() * 0.6, 0).toVector().subtract(eye.toVector());
+        double len = Math.min(64, to.length());
+        if (len < 1e-3) return false;
+        to.multiply(1.0 / to.length());
+        World w = eye.getWorld();
+        for (double s = 0.5; s < len; s += 0.6) {
+            int x = (int) Math.floor(eye.getX() + to.getX() * s), y = (int) Math.floor(eye.getY() + to.getY() * s),
+                z = (int) Math.floor(eye.getZ() + to.getZ() * s);
+            if (!w.isChunkLoaded(x >> 4, z >> 4)) break;
+            if (w.getBlockAt(x, y, z).isLiquid()) return wetCached = true;
+        }
+        return false;
+    }
+
+    private int meleeMoodAt;
+    private boolean meleeMoodOn;
+
+    /** Тянет ли сейчас подраться в упор (меняется раз в 5-10 секунд, штурмовика тянет чаще). */
+    private boolean meleeMood(int now) {
+        if (now >= meleeMoodAt) {
+            meleeMoodAt = now + 20 * (5 + rnd.nextInt(6));
+            double pr = 0.35 + (persona.type == Persona.Archetype.ASSAULT ? 0.3 : persona.type == Persona.Archetype.MARKSMAN ? -0.2 : 0);
+            meleeMoodOn = rnd.nextDouble() < pr;
+        }
+        return meleeMoodOn;
     }
 
     private int weaponSlot(Player p, Weapon w) {
@@ -7936,7 +7983,13 @@ public final class Bot {
         int planks = Crafting.countTag(inv, false);
         boolean climber = persona.type == Persona.Archetype.TACTICIAN || persona.type == Persona.Archetype.SURVIVOR
             || persona.type == Persona.Archetype.MARKSMAN || pitMode || finale();
-        if (Builder.ladderCount(p) >= 4 || planks < (climber ? 8 : 16)) return;
+        // Меч лучше того, что есть, можно сделать из того, что при себе (алмазы, железо, булыжник, доски).
+        int ms = bestMelee(p);
+        double haveDps = ms >= 0 ? Items.meleeDps(inv.getItem(ms)) : 2.0;
+        Material swordHead = Crafting.betterSword(w, inv, haveDps);
+        boolean wantSword = swordHead != null;
+        boolean wantLadders = Builder.ladderCount(p) < 4 && planks >= (climber ? 8 : 16);
+        if (!wantSword && !wantLadders) return;
         Block table = nearbyTable(p);
         if (table != null) tableFails = 0;
         if (table == null) {
@@ -7946,7 +7999,10 @@ public final class Bot {
                 if (it != null && it.getType() == Material.CRAFTING_TABLE && !it.hasItemMeta()) ts = i;
             }
             if (ts < 0) {
-                if (planks >= 12 && Crafting.table(w, inv)) craftUntil = now + 10 + rnd.nextInt(8);
+                // На верстак 4 доски, и ещё должно хватить на палку (и клинок, если меч деревянный).
+                int needPlanks = wantLadders ? 12 : Crafting.isPlanks(swordHead) ? 10 : 6;
+                if (planks >= needPlanks && Crafting.table(w, inv)) craftUntil = now + 10 + rnd.nextInt(8);
+                else if (wantSword && !wantLadders) nextCraft = now + 20 * 20; // досок на верстак нет
                 return;
             }
             // Поставили, а верстака нет (не дал сервер) - пару раз, потом надолго бросаем.
@@ -7959,6 +8015,16 @@ public final class Bot {
             craftLook = null;
             return;
         }
+        if (wantSword) {
+            ItemStack sword = Crafting.sword(w, inv, haveDps);
+            if (sword != null) {
+                craftUntil = now + 20 + rnd.nextInt(15);
+                craftLook = table.getLocation().add(0.5, 1.0, 0.5);
+                note(name + " крафтит " + sword.getType().name().toLowerCase());
+                return;
+            }
+        }
+        if (!wantLadders) return;
         int guard = 0;
         while (Crafting.count(inv, Material.STICK) < 7 && guard++ < 3 && Crafting.sticks(w, inv)) { }
         if (Crafting.ladders(w, inv)) {

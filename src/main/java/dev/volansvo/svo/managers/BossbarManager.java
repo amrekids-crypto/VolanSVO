@@ -49,7 +49,8 @@ public class BossbarManager {
         int m = s / 60;
         int rs = s % 60;
         int alive = plugin.getGameManager() != null ? plugin.getGameManager().getActivePlayers().size() : 0;
-        return String.format("СВО %02d:%02d | Живых: %d", m, rs, alive);
+        boolean ot = plugin.getGameManager() != null && plugin.getGameManager().isOvertime();
+        return String.format(ot ? "Добивание %02d:%02d | Живых: %d" : "СВО %02d:%02d | Живых: %d", m, rs, alive);
     }
 
     /** Имя босса для активной карты (svo=Жириновский, east=Нетаньяху). */

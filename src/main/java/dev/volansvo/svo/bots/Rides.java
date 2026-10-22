@@ -215,6 +215,8 @@ final class Rides {
         if (far >= 60 && now >= banTrainUntil && tryTrain(p, now, travel)) return;
 
         if (far < carFar || now < banCarsUntil) return;
+        // По прямой к цели озеро или река - на технике туда не доехать.
+        if (wetRoute(p.getWorld(), p.getLocation(), travel, 120)) { banCarsUntil = now + 20 * 20; return; }
         // 3. Пустая техника рядом - садимся за руль.
         Entity part = nearestEmptyCar(p, 24, null);
         if (part != null) {
@@ -893,6 +895,7 @@ final class Rides {
             // Дистанция танка: далеко - подъезжаем, вплотную - сдаём назад (в упор пушка мажет
             // и пехота забирается на броню), в середине стоим и стреляем.
             boolean fwd = ed > 38 || !p.hasLineOfSight(enemy) && ed > 12, back = ed < 9;
+            if (fwd && wetAhead(me, me.getYaw(), 3, 9)) fwd = false;
             BotNms.keys(p, fwd, back, false, false, false, false);
             if (now - lastShot > 30 && p.hasLineOfSight(enemy)) { BotNms.swing(p); lastShot = now; }
             return true;
@@ -910,8 +913,27 @@ final class Rides {
             BotNms.keys(p, false, true, false, false, false, false);
             return true;
         }
+        // Впереди вода: ищем курс в обход (ближайший к цели), на время держим его.
+        if (now < detourUntil) yaw = detourYaw;
+        else if (wetAhead(me, yaw, 3, 12) || wetAhead(me, me.getYaw(), 3, 8)) {
+            Float best = null;
+            for (float off : new float[]{30f, -30f, 60f, -60f, 90f, -90f, 125f, -125f}) {
+                if (!wetAhead(me, yaw + off, 3, 14)) { best = yaw + off; break; }
+            }
+            if (best == null) {
+                // Кругом вода: дальше пешком.
+                BotNms.keys(p, false, true, false, false, false, false);
+                if (moved(p, now) < 0.3) { BotNms.keys(p, false, false, false, false, false, false); dismount(p); endCar(now, 20 * 60); }
+                return true;
+            }
+            detourYaw = best;
+            detourUntil = now + 30;
+            yaw = best;
+        }
+        // Вода прямо перед носом (не успели отвернуть): тормоз, пока разворачиваемся.
+        boolean brake = wetAhead(me, me.getYaw(), 2, 4);
         motor.turn(p, yaw, 5f, 9f);
-        BotNms.keys(p, true, false, false, false, false, false);
+        BotNms.keys(p, !brake, brake && moved(p, now) > 0.4, false, false, false, false);
         // Упёрлись: сдаём назад с поворотом, после трёх раз выходим.
         if (now - lastPosTick >= 50) {
             double mv = lastPos == null || !lastPos.getWorld().equals(me.getWorld()) ? 99 : flat(lastPos, me);
@@ -923,6 +945,59 @@ final class Rides {
             }
         }
         return true;
+    }
+
+    private float detourYaw;
+    private int detourUntil;
+
+    /** Поверхность в точке (x,z) около высоты y - вода (или лава). */
+    private static boolean wetAt(World w, double x, double y, double z) {
+        int bx = (int) Math.floor(x), bz = (int) Math.floor(z);
+        if (!w.isChunkLoaded(bx >> 4, bz >> 4)) return false;
+        int top = (int) Math.floor(y) + 2;
+        for (int yy = top; yy >= top - 8; yy--) {
+            Block b = w.getBlockAt(bx, yy, bz);
+            if (b.isLiquid()) return true;
+            org.bukkit.Material m = b.getType();
+            if (m == org.bukkit.Material.SEAGRASS || m == org.bukkit.Material.TALL_SEAGRASS || m == org.bukkit.Material.KELP
+                    || m == org.bukkit.Material.KELP_PLANT || m == org.bukkit.Material.BUBBLE_COLUMN) return true;
+            if (b.getBlockData() instanceof org.bukkit.block.data.Waterlogged
+                    && ((org.bukkit.block.data.Waterlogged) b.getBlockData()).isWaterlogged() && !m.isSolid()) return true;
+            if (m.isSolid()) return false;
+        }
+        return false;
+    }
+
+    /** По курсу yaw на расстоянии from..to блоков (и по бокам корпуса) есть вода. */
+    private static boolean wetAhead(Location me, float yaw, double from, double to) {
+        World w = me.getWorld();
+        double rad = Math.toRadians(yaw);
+        double fx = -Math.sin(rad), fz = Math.cos(rad);
+        for (double s = from; s <= to; s += 1.5) {
+            for (double side = -1.2; side <= 1.21; side += 1.2) {
+                double x = me.getX() + fx * s - fz * side, z = me.getZ() + fz * s + fx * side;
+                if (wetAt(w, x, me.getY(), z)) return true;
+            }
+        }
+        return false;
+    }
+
+    /** По прямой от a до b (первые max блоков) воды больше, чем на пару прыжков колёс. */
+    private static boolean wetRoute(World w, Location a, Location b, double max) {
+        double dx = b.getX() - a.getX(), dz = b.getZ() - a.getZ();
+        double h = Math.hypot(dx, dz), len = Math.min(max, h);
+        if (len < 1) return false;
+        dx /= h;
+        dz /= h;
+        int wet = 0;
+        for (double s = 6; s < len; s += 4) {
+            double x = a.getX() + dx * s, z = a.getZ() + dz * s;
+            int bx = (int) Math.floor(x), bz = (int) Math.floor(z);
+            if (!w.isChunkLoaded(bx >> 4, bz >> 4)) break;
+            Block top = w.getHighestBlockAt(bx, bz);
+            if (top.isLiquid() && ++wet >= 3) return true;
+        }
+        return false;
     }
 
     private boolean carRide(Player p, int now, LivingEntity enemy) {

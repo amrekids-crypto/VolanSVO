@@ -74,6 +74,7 @@ public class VolanSVO extends JavaPlugin {
         getServer().getPluginManager().registerEvents(new DeathListener(this), this);
         getServer().getPluginManager().registerEvents(new EntityListener(this), this);
         getServer().getPluginManager().registerEvents(new CommandListener(this), this);
+        getServer().getPluginManager().registerEvents(lootManager, this);
 
         gameManager.ensureScoreboards();
         // Отключаем паузу сервера при отсутствии игроков (иначе таймер замирает).

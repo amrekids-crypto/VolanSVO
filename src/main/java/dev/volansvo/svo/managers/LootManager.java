@@ -13,7 +13,7 @@ import org.bukkit.map.MapView;
 
 import java.util.*;
 
-public class LootManager {
+public class LootManager implements org.bukkit.event.Listener {
 
     private final VolanSVO plugin;
     private final Random rng = new Random();
@@ -26,6 +26,16 @@ public class LootManager {
     /** Перезаполнение, запрошенное во время идущего прохода (выполним после него). */
     private World pendingWorld;
     private dev.volansvo.svo.maps.MapData pendingMap;
+
+    /** Сундуки в чанках, которые сейчас не загружены: заполняем, когда чанк загрузится
+     *  (к нему подошёл игрок или бот). Раньше на каждую смерть грузили с диска сотни чанков
+     *  карты по 6 за тик, и сервер падал до 5-6 TPS на всё время прохода. */
+    private final Map<Long, List<int[]>> lazyChunks = new HashMap<Long, List<int[]>>();
+    private World lazyWorld;
+    private List<ItemStack[]> lazyTemplates = new ArrayList<ItemStack[]>();
+    /** Содержимое темплейт-сундуков, прочитанное один раз на игру (по имени мира). */
+    private String templatesWorld;
+    private List<ItemStack[]> templatesCache;
 
     /** 254 координаты сундуков (из оригинального place_chests.mcfunction). */
     private static final int[][] CHEST_COORDS = {
@@ -157,16 +167,23 @@ public class LootManager {
         // (setblock + data modify ... set from block <template>), а чанки темплейтов
         // приходилось держать загруженными всю генерацию. Теперь читаем содержимое
         // темплейт-сундуков ОДИН раз в память и наполняем сундуки напрямую через Bukkit API.
-        final List<ItemStack[]> templateItems = new ArrayList<ItemStack[]>();
-        for (int[] t : templates) {
-            world.getChunkAt(t[0] >> 4, t[2] >> 4); // синхронная загрузка чанка темплейта
-            BlockState st = world.getBlockAt(t[0], t[1], t[2]).getState();
-            if (st instanceof Chest) {
-                ItemStack[] src = ((Chest) st).getBlockInventory().getContents();
-                ItemStack[] copy = new ItemStack[src.length];
-                for (int i = 0; i < src.length; i++) copy[i] = (src[i] == null) ? null : src[i].clone();
-                templateItems.add(copy);
+        // Темплейты не меняются за игру: читаем их один раз на мир, а не на каждую смерть.
+        final List<ItemStack[]> templateItems;
+        if (templatesCache != null && world.getName().equals(templatesWorld)) {
+            templateItems = templatesCache;
+        } else {
+            templateItems = new ArrayList<ItemStack[]>();
+            for (int[] t : templates) {
+                world.getChunkAt(t[0] >> 4, t[2] >> 4); // синхронная загрузка чанка темплейта
+                BlockState st = world.getBlockAt(t[0], t[1], t[2]).getState();
+                if (st instanceof Chest) {
+                    ItemStack[] src = ((Chest) st).getBlockInventory().getContents();
+                    ItemStack[] copy = new ItemStack[src.length];
+                    for (int i = 0; i < src.length; i++) copy[i] = (src[i] == null) ? null : src[i].clone();
+                    templateItems.add(copy);
+                }
             }
+            if (!templateItems.isEmpty()) { templatesCache = templateItems; templatesWorld = world.getName(); }
         }
         if (templateItems.isEmpty()) {
             plugin.getLogger().warning("placeAndFill: не найден ни один темплейт-сундук (source="
@@ -182,20 +199,22 @@ public class LootManager {
             list.add(c);
         }
 
-        // КРИТИЧНО: сундуки разбросаны по всей карте (1000x1000). Форслоадить ВСЕ их чанки
-        // сразу (200+) - краш по памяти. Обрабатываем по нескольку чанков за тик:
-        // forceload -> заполнить через API -> снять форслоад (с задержкой, чтобы запись
-        // закоммитилась до выгрузки чанка).
-        // ОПТИМИЗАЦИЯ: раньше форслоад/снятие шли через Bukkit.dispatchCommand("execute in ...
-        // forceload add/remove ...") - ДВА полных разбора команды (парсер Brigadier) НА КАЖДЫЙ
-        // чанк. При up to 341 сундуке (карта east) это сотни лишних command-dispatch'ей на
-        // КАЖДЫЙ вызов, а refreshChests() дёргается на КАЖДУЮ смерть игрока. Теперь - прямой
-        // API world.setChunkForceLoaded(), без парсинга команд (тот же приём, что и в ChaosManager).
+        // Сундуки разбросаны по всей карте (1000x1000), чанков с ними сотни. Загруженные чанки
+        // заполняем сразу (по нескольку за тик, это дёшево), незагруженные - когда загрузятся:
+        // до этого их никто не видит, а грузить их с диска ради сундуков - главная причина лагов.
         final World fworld = world;
-        final List<Map.Entry<Long, List<int[]>>> entries =
-            new ArrayList<Map.Entry<Long, List<int[]>>>(byChunk.entrySet());
-        final int totalChunks = entries.size();
-        final int CHUNKS_PER_TICK = 6;
+        final List<Map.Entry<Long, List<int[]>>> entries = new ArrayList<Map.Entry<Long, List<int[]>>>();
+        lazyChunks.clear();
+        lazyWorld = world;
+        lazyTemplates = templateItems;
+        for (Map.Entry<Long, List<int[]>> e : byChunk.entrySet()) {
+            int cx = (int) (e.getKey() >> 32), cz = (int) (long) e.getKey();
+            if (world.isChunkLoaded(cx, cz)) entries.add(e);
+            else lazyChunks.put(e.getKey(), e.getValue());
+        }
+        final int totalChunks = byChunk.size();
+        final int lazyCount = lazyChunks.size();
+        final int CHUNKS_PER_TICK = 8;
 
         new org.bukkit.scheduler.BukkitRunnable() {
             int idx = 0;
@@ -204,38 +223,18 @@ public class LootManager {
                 int processedThisTick = 0;
                 while (idx < entries.size() && processedThisTick < CHUNKS_PER_TICK) {
                     Map.Entry<Long, List<int[]>> e = entries.get(idx++);
-                    final Long key = e.getKey();
-                    forceload(fworld, key, true);
-                    for (int[] c : e.getValue()) {
-                        Block b = fworld.getBlockAt(c[0], c[1], c[2]);
-                        if (rng.nextBoolean()) {
-                            b.setType(Material.AIR, false);
-                            deleted++;
-                            continue;
-                        }
-                        b.setType(Material.CHEST, false);
-                        if (!templateItems.isEmpty()) {
-                            BlockState st = b.getState();
-                            if (st instanceof Chest) {
-                                ItemStack[] items = templateItems.get(rng.nextInt(templateItems.size()));
-                                Inventory inv = ((Chest) st).getBlockInventory();
-                                inv.clear();
-                                for (int i = 0; i < items.length; i++)
-                                    if (items[i] != null) inv.setItem(i, items[i].clone());
-                            }
-                        }
-                        placed++;
-                    }
-                    // снимаем форслоад через 4 тика - чтобы запись успела закоммититься до выгрузки
-                    Bukkit.getScheduler().runTaskLater(plugin, new Runnable() {
-                        @Override public void run() { forceload(fworld, key, false); }
-                    }, 4L);
+                    int cx = (int) (e.getKey() >> 32), cz = (int) (long) e.getKey();
                     processedThisTick++;
+                    // Пока ждали очереди, чанк выгрузился - заполним при следующей загрузке.
+                    if (!fworld.isChunkLoaded(cx, cz)) { lazyChunks.put(e.getKey(), e.getValue()); continue; }
+                    int[] r = fillChests(fworld, e.getValue(), templateItems);
+                    placed += r[0];
+                    deleted += r[1];
                 }
                 if (idx >= entries.size()) {
                     plugin.getLogger().info("placeAndFill: placed=" + placed + " deleted=" + deleted
-                        + " (чанков сундуков: " + totalChunks + ", темплейтов: " + templateItems.size()
-                        + ", source=" + source + ")");
+                        + " (чанков сундуков: " + totalChunks + ", отложено до загрузки: " + lazyCount
+                        + ", темплейтов: " + templateItems.size() + ", source=" + source + ")");
                     refillInProgress = false;
                     cancel();
                     World again = pendingWorld;
@@ -248,11 +247,57 @@ public class LootManager {
         }.runTaskTimer(plugin, 1L, 1L);
     }
 
-    /** forceload add/remove для одного чанка - напрямую через API, без dispatchCommand. */
-    private void forceload(World world, long key, boolean add) {
-        int cx = (int) (key >> 32);
-        int cz = (int) (long) key;
-        try { world.setChunkForceLoaded(cx, cz, add); } catch (Throwable ignored) {}
+    /** Сундуки одного чанка: половину убрать, в остальные - лут случайного темплейта. {поставлено, убрано}. */
+    private int[] fillChests(World w, List<int[]> list, List<ItemStack[]> templateItems) {
+        int placed = 0, deleted = 0;
+        for (int[] c : list) {
+            Block b = w.getBlockAt(c[0], c[1], c[2]);
+            if (rng.nextBoolean()) {
+                b.setType(Material.AIR, false);
+                deleted++;
+                continue;
+            }
+            b.setType(Material.CHEST, false);
+            if (!templateItems.isEmpty()) {
+                BlockState st = b.getState();
+                if (st instanceof Chest) {
+                    ItemStack[] items = templateItems.get(rng.nextInt(templateItems.size()));
+                    Inventory inv = ((Chest) st).getBlockInventory();
+                    inv.clear();
+                    for (int i = 0; i < items.length; i++)
+                        if (items[i] != null) inv.setItem(i, items[i].clone());
+                }
+            }
+            placed++;
+        }
+        return new int[]{placed, deleted};
+    }
+
+    /** Чанк с отложенными сундуками загрузился - заполняем их следующим тиком. */
+    @org.bukkit.event.EventHandler
+    public void onChunkLoad(org.bukkit.event.world.ChunkLoadEvent e) {
+        if (lazyChunks.isEmpty() || lazyWorld == null || !e.getWorld().equals(lazyWorld)) return;
+        final long key = chunkKey(e.getChunk().getX(), e.getChunk().getZ());
+        final List<int[]> list = lazyChunks.remove(key);
+        if (list == null) return;
+        final World w = e.getWorld();
+        final List<ItemStack[]> tpl = lazyTemplates;
+        Bukkit.getScheduler().runTask(plugin, new Runnable() {
+            @Override public void run() {
+                if (!plugin.getGameManager().isGameActive() || !w.equals(lazyWorld)) return;
+                int cx = (int) (key >> 32), cz = (int) key;
+                if (!w.isChunkLoaded(cx, cz)) { lazyChunks.put(key, list); return; }
+                fillChests(w, list, tpl);
+            }
+        });
+    }
+
+    /** Игра закончилась: отложенные сундуки больше не нужны (мир удаляется). */
+    public void clearLazy() {
+        lazyChunks.clear();
+        lazyWorld = null;
+        templatesCache = null;
+        templatesWorld = null;
     }
 
     private static long chunkKey(int cx, int cz) {

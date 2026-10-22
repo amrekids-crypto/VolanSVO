@@ -126,6 +126,9 @@ public class GameManager {
     private BukkitTask tickTask;
     private UUID winner = null;
     private boolean timeRanOut = false;
+    /** Время вышло, а живых больше одного (одной команды): зона сжимается в точку, 3 минуты добить друг друга. */
+    private boolean overtime = false;
+    private static final int OVERTIME_TICKS = 20 * 60 * 3;
 
     /** Для вотчдога: значение currentTick при прошлой проверке и сколько проверок оно не менялось. */
     private int watchdogLastSeenTick = -1;
@@ -2419,6 +2422,10 @@ public class GameManager {
         gameWorld.setGameRule(GameRule.DO_MOB_SPAWNING, false);
         // ВАЖНО: смерть не должна сохранять лут (мир клонируется из лобби, где keepInventory мог быть true).
         gameWorld.setGameRule(GameRule.KEEP_INVENTORY, false);
+        // Предметы ExecutableItems выполняют команды от имени игрока (fill и т.п.): без этого каждая
+        // такая команда пишется в консоль и рассылается всем операторам по нескольку раз в секунду.
+        gameWorld.setGameRule(GameRule.LOG_ADMIN_COMMANDS, false);
+        overtime = false;
 
         // ВАЖНО: игру переводим в ACTIVE и запускаем таймер ДО спавна Жириновского.
         // Если спавн варда упадёт с ошибкой - таймер и зона всё равно будут работать.
@@ -2468,7 +2475,7 @@ public class GameManager {
                 // КАЖДЫЙ обработчик в своём try/catch. Иначе одно исключение
                 // отменяет весь BukkitRunnable и таймер замораживается навсегда.
                 safe("updateTimerProgress", new Runnable() { public void run() {
-                    plugin.getBossbarManager().updateTimerProgress(currentTick, timerTicks); } });
+                    plugin.getBossbarManager().updateTimerProgress(currentTick, overtime ? OVERTIME_TICKS : timerTicks); } });
                 safe("borderShrink", new Runnable() { public void run() {
                     handleBorderShrink(); } });
                 safe("slowFalling", new Runnable() { public void run() {
@@ -2500,7 +2507,9 @@ public class GameManager {
                 if (currentTick % 80 == 0) safe("spectators", new Runnable() { public void run() {
                     handleSpectators(); } });
 
-                if (currentTick <= 0) {
+                if (currentTick <= 0 && !overtime && aliveSides() > 1) {
+                    safe("overtime", new Runnable() { public void run() { startOvertime(); } });
+                } else if (currentTick <= 0) {
                     timeRanOut = true;
                     safe("endGame", new Runnable() { public void run() { endGame(null); } });
                     cancel();
@@ -2508,6 +2517,45 @@ public class GameManager {
             }
         }.runTaskTimer(plugin, 1L, 1L);
     }
+
+    /** Сколько сторон ещё живо: игроков в одиночном режиме, команд в командном. */
+    private int aliveSides() {
+        Set<Integer> teams = new HashSet<Integer>();
+        int solo = 0;
+        for (SvoPlayer sp : players.values()) {
+            if (!sp.isAlive()) continue;
+            if (teamSize <= 1 || sp.getTeamId() < 0) solo++;
+            else teams.add(sp.getTeamId());
+        }
+        return solo + teams.size();
+    }
+
+    /**
+     * Основное время вышло, а победителя нет: вместо ничьей зона сжимается до 1 блока за
+     * 2.5 минуты, и на всё даётся ещё 3 минуты. За зоной урон без запаса и сильнее обычного.
+     */
+    private void startOvertime() {
+        overtime = true;
+        currentTick = OVERTIME_TICKS;
+        // «Боты доигрывают 30 секунд» считается от currentTick - переносим отсчёт.
+        if (noHumansSinceTick >= 0) noHumansSinceTick = OVERTIME_TICKS;
+        World gw = plugin.getWorldManager().getGameWorld();
+        if (gw != null) {
+            WorldBorder wb = gw.getWorldBorder();
+            wb.setDamageBuffer(0);
+            wb.setDamageAmount(Math.max(1.0, wb.getDamageAmount()));
+            wb.setWarningDistance(Math.max(5, wb.getWarningDistance()));
+            wb.setSize(1, (OVERTIME_TICKS - 600) / 20);
+        }
+        for (Player p : getAllSvoPlayers()) {
+            p.sendTitle(ChatColor.RED + "Время вышло!", ChatColor.YELLOW + "Зона сжимается в точку: 3 минуты", 10, 70, 20);
+        }
+        broadcastGame(ChatColor.RED + "" + ChatColor.BOLD + "Время вышло! " + ChatColor.YELLOW
+            + "Зона сжимается до 1 блока. 3 минуты, чтобы добить друг друга!");
+    }
+
+    /** Идёт добавочное время (зона сжимается в точку). */
+    public boolean isOvertime() { return overtime; }
 
     /** Выполняет шаг тик-лупа, гася любые исключения - чтобы таймер не замёрз. */
     private void safe(String label, Runnable r) {
@@ -2562,11 +2610,27 @@ public class GameManager {
             if (p == null || !p.isOnline() || !isPlayerInGame(uid)) { it.remove(); continue; }
             if (!p.hasPotionEffect(PotionEffectType.SLOW_FALLING)) { it.remove(); continue; } // истёк сам
             Block below = p.getLocation().subtract(0, 1, 0).getBlock();
-            if (below.getType().isSolid()) {
+            // Приземлился на летающую постройку (дирижабль, мост): эффект оставляем до конца,
+            // чтобы можно было спрыгнуть вниз, иначе с неё не слезть живым.
+            if (below.getType().isSolid() && !floatingFloor(below)) {
                 p.removePotionEffect(PotionEffectType.SLOW_FALLING);
                 it.remove();
             }
         }
+    }
+
+    /** Пол толщиной до 4 блоков, под которым 10+ блоков пустоты. */
+    private static boolean floatingFloor(Block floorTop) {
+        int floor = 0;
+        Block b = floorTop;
+        while (floor < 5 && !b.isPassable()) { floor++; b = b.getRelative(org.bukkit.block.BlockFace.DOWN); }
+        if (floor >= 5) return false;
+        int air = 0;
+        while (air < 10 && b.getY() > b.getWorld().getMinHeight() && b.isPassable() && !b.isLiquid()) {
+            air++;
+            b = b.getRelative(org.bukkit.block.BlockFace.DOWN);
+        }
+        return air >= 10;
     }
 
     private void handleGlow() {
@@ -3322,6 +3386,7 @@ public class GameManager {
     public void emergencyCleanup() {
         if (tickTask != null) { tickTask.cancel(); tickTask = null; }
         timeRanOut = false;
+        overtime = false;
         glowTimer = 4800;
         airdropTimer = 0;
         respawnGrace.clear();
@@ -3606,6 +3671,7 @@ public class GameManager {
         airdropTimer = 0;
         activeVote = null;
         timeRanOut = false;
+        overtime = false;
         dimensionMismatchTicks.clear();
         lastKiller.clear();
         lastDamager.clear();

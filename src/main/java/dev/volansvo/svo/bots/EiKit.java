@@ -154,6 +154,9 @@ final class EiKit {
     /**
      * Попробовать боевой предмет против врага. true - этот тик занят предметом.
      */
+    /** Выстрел уйдёт в воду (мы или цель в воде): пулемётик и снайперку не берём. Ставит бот. */
+    boolean wet;
+
     boolean combat(Player p, int now, LivingEntity e, double d, boolean visible, Vector vel) {
         if (restoreOffhandAt >= 0) return true;
         if (pending != null) {
@@ -166,14 +169,14 @@ final class EiKit {
         }
         if (!visible) return false;
         // Порядок: сильное и редкое первым.
-        if (d >= 12 && d <= 110 && tryStart(p, now, Use.SNIPER)) return finish(p, now, e, d, vel);
+        if (!wet && d >= 12 && d <= 110 && tryStart(p, now, Use.SNIPER)) return finish(p, now, e, d, vel);
         if (d >= 6 && d <= 48 && tryStart(p, now, Use.ROCKET)) return finish(p, now, e, d, vel);
         if (d >= 4 && d <= 30 && tryStart(p, now, Use.BLACKHOLE)) return finish(p, now, e, d, vel);
         if (d <= 20 && ready(Use.STIM, now) && !p.hasPotionEffect(PotionEffectType.STRENGTH) && tryStart(p, now, Use.STIM)) return finish(p, now, e, d, vel);
         if (d <= 6 && tryStart(p, now, Use.ORBITAL)) return finish(p, now, e, d, vel);
         if (d >= 3 && d <= 7 && tryStart(p, now, Use.TNT_AHEAD)) return finish(p, now, e, d, vel);
         if (d <= 10 && tryStart(p, now, Use.FLAMER)) return finish(p, now, e, d, vel);
-        if (d <= 40 && tryStart(p, now, Use.PULSE)) return finish(p, now, e, d, vel);
+        if (!wet && d <= 40 && tryStart(p, now, Use.PULSE)) return finish(p, now, e, d, vel);
         if (d <= 5 && tryStart(p, now, Use.FATIGUE)) return finish(p, now, e, d, vel);
         if (d >= 3 && d <= 7 && tryStart(p, now, Use.JUSTICE)) return finish(p, now, e, d, vel);
         if (e instanceof Player && ((Player) e).isGliding() && tryStart(p, now, Use.ZEUS)) return finish(p, now, e, d, vel);
