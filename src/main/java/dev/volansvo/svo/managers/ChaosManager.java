@@ -91,6 +91,8 @@ public class ChaosManager {
     private int nextLightning;
     private int nextSwap;
     private int nextNukeGive;
+    /** Последняя выдача ядерки не удалась - повторить через минуту, а не через 10. */
+    private boolean nextNukeRetry;
 
     private static final int METEOR_INTERVAL_SEC = 10; // раз в 10 сек (вдвое чаще базовых 20 сек)
     private static final float METEOR_POWER = 20f;
@@ -267,7 +269,11 @@ public class ChaosManager {
                     if (sec >= nextArrowRain) { startArrowRain(); nextArrowRain = sec + ARROW_RAIN_INTERVAL; }
                     if (sec >= nextLightning) { strikeLightning(); nextLightning = sec + LIGHTNING_INTERVAL; }
                     if (sec >= nextSwap) { trySwapInventories(); nextSwap = sec + SWAP_INTERVAL; }
-                    if (sec >= nextNukeGive) { giveRandomNuke(); nextNukeGive = sec + NUKE_GIVE_INTERVAL; }
+                    if (sec >= nextNukeGive) {
+                        nextNukeRetry = false;
+                        giveRandomNuke();
+                        nextNukeGive = sec + (nextNukeRetry ? 60 : NUKE_GIVE_INTERVAL);
+                    }
                     if (sec >= nextFactionSpawn) {
                         spawnFactionWave();
                         spawnUnWave();
@@ -870,10 +876,47 @@ public class ChaosManager {
         }
         if (active.isEmpty()) return;
         Player p = active.get(rng.nextInt(active.size()));
+        // MilitaryCraft кладёт чемодан через addItem и не проверяет, влез ли он: при полном
+        // инвентаре ядерка пропадала, а сообщение о выдаче всё равно приходило. Освобождаем слот.
+        org.bukkit.inventory.PlayerInventory inv = p.getInventory();
+        if (inv.firstEmpty() < 0) {
+            for (int s = 35; s >= 0; s--) {
+                if (s == inv.getHeldItemSlot()) continue;
+                org.bukkit.inventory.ItemStack it = inv.getItem(s);
+                if (it == null || isBriefcase(it)) continue;
+                p.getWorld().dropItemNaturally(p.getLocation(), it);
+                inv.setItem(s, null);
+                p.sendMessage(ChatColor.GRAY + "Инвентарь полон: выпало " + it.getType().name().toLowerCase()
+                    + ", чтобы влезла бомба.");
+                break;
+            }
+        }
+        int before = countBriefcases(p);
         // Команда плагина MilitaryCraft - "nuke", а не "nukestrike:nuke" (ошибка в префиксе
         // была причиной того, что предмет не выдавался, хотя сообщение в чат уже уходило).
-        Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "nuke give " + p.getName());
-        p.sendMessage(ChatColor.GOLD + "Ты счастливчик, ООН передал тебе миротворческую бомбу");
+        boolean known = Bukkit.dispatchCommand(Bukkit.getConsoleSender(), "nuke give " + p.getName());
+        if (countBriefcases(p) > before) {
+            p.sendMessage(ChatColor.GOLD + "Ты счастливчик, ООН передал тебе миротворческую бомбу");
+            return;
+        }
+        // Не выдалось: сообщаем в консоль, игроку не врём. Попробуем снова через минуту.
+        nextNukeRetry = true;
+        plugin.getLogger().warning("[Хаос] Ядерка не выдана " + p.getName() + ": команда nuke "
+            + (known ? "выполнилась, но чемодана в инвентаре нет" : "не найдена")
+            + ". Нужна версия MilitaryCraft, где /nuke give <игрок> работает из консоли.");
+    }
+
+    /** Чемодан ядерки MilitaryCraft (PDC nukestrike:nuke_briefcase). */
+    private static boolean isBriefcase(org.bukkit.inventory.ItemStack it) {
+        if (it == null || !it.hasItemMeta()) return false;
+        org.bukkit.NamespacedKey k = new org.bukkit.NamespacedKey("nukestrike", "nuke_briefcase");
+        return it.getItemMeta().getPersistentDataContainer().getKeys().contains(k);
+    }
+
+    private static int countBriefcases(Player p) {
+        int n = 0;
+        for (org.bukkit.inventory.ItemStack it : p.getInventory().getContents()) if (isBriefcase(it)) n += it.getAmount();
+        return n;
     }
 
     // ----- падающие стенды razboist на старте -----
